@@ -1,0 +1,93 @@
+<div id="gakuactors-preview" class="viz-dotted-background">
+  <section class="ga-window" aria-label="GakuActors 场景人物管理设计预览">
+    <header><div><span class="ga-eyebrow">GAKUACTORS</span><h2>场景人物管理</h2></div><span class="ga-tag">交互设计 · 示例数据</span></header>
+    <div class="ga-layout">
+      <aside><div class="ga-label">人物目录</div><input aria-label="搜索人物" placeholder="搜索人物名称" class="ga-search"><nav aria-label="人物分类"><button data-filter="all" aria-pressed="true">全部</button><button data-filter="special">特殊人物</button></nav><div class="ga-characters"></div></aside>
+      <main>
+        <div class="ga-title"><div><h3 class="ga-person-name">花海咲季</h3><span class="ga-secondary">选择预设，或新建头身组合</span></div><button class="ga-new">＋ 新建预设</button></div>
+        <div class="ga-presets"></div>
+        <form class="ga-editor" hidden>
+          <div class="ga-editor-title"><h3>新建人物预设</h3><button type="button" class="ga-cancel" aria-label="关闭预设编辑">×</button></div>
+          <label>预设名称<input name="presetName" required maxlength="40"></label>
+          <div class="ga-parts"><label>身体／服装<select name="body"></select></label><label>头部／发型<select name="head"></select></label></div>
+          <div class="ga-save-row"><span class="ga-secondary">保存组合，后续可重复加入场景</span><button type="submit" class="ga-primary">保存预设</button></div>
+        </form>
+        <div class="ga-rule"><i data-lucide="copy" aria-hidden="true"></i><span>加入后与主角色重叠，后续可分别定位</span></div>
+      </main>
+    </div>
+    <section class="ga-scene" aria-label="当前场景人物">
+      <div class="ga-scene-head"><h3>当前场景 <span class="ga-count">1</span></h3><span class="ga-secondary">主角色：花海咲季</span></div>
+      <div class="ga-scene-list"></div><div class="ga-notice" role="status" aria-live="polite">设计预览中的加入和保存仅用于演示。</div>
+    </section>
+    <footer><span><span class="ga-status-dot"></span> 独立人物插件</span><span>人物预设 · 场景管理</span></footer>
+  </section>
+</div>
+<style>
+#gakuactors-preview{color-scheme:light dark;padding:18px 0;font-family:"Segoe UI","Microsoft YaHei",sans-serif;--ga-bg:light-dark(#f7fbfd,#14202a);--ga-panel:light-dark(#fff,#1b2a36);--ga-blue:light-dark(#e6f4fb,#213849);--ga-line:light-dark(#dce7ed,#354752);--ga-fg:light-dark(#263b49,#e2edf4);--ga-muted:light-dark(#637b89,#9eb5c5);--ga-accent:#f58a32;--ga-accent-text:#241b12;--ga-round:18px}
+#gakuactors-preview *{box-sizing:border-box}
+#gakuactors-preview .ga-window{background:var(--ga-bg);color:var(--ga-fg);border:1px solid var(--ga-line);border-radius:var(--ga-round);overflow:hidden;box-shadow:0 14px 45px #00000016;max-width:920px;margin:auto}
+#gakuactors-preview header{display:flex;justify-content:space-between;align-items:center;gap:18px;background:var(--ga-blue);padding:23px 25px;border-bottom:1px solid var(--ga-line)}
+#gakuactors-preview h2{font-size:23px;line-height:1.35;margin:3px 0 0;font-weight:600}#gakuactors-preview h3{font-size:16px;margin:0;font-weight:600}
+#gakuactors-preview .ga-eyebrow{font-size:10px;letter-spacing:2.4px;color:var(--ga-muted)}
+#gakuactors-preview .ga-tag{font-size:11px;color:var(--ga-muted);background:var(--ga-panel);padding:7px 10px;border-radius:20px;white-space:nowrap}
+#gakuactors-preview button{font:inherit;color:inherit;cursor:pointer;border:1px solid var(--ga-line);background:var(--ga-panel);padding:9px 13px;border-radius:10px;line-height:1.3}
+#gakuactors-preview button:hover{filter:brightness(.96)}#gakuactors-preview button:focus-visible,#gakuactors-preview input:focus-visible,#gakuactors-preview select:focus-visible{outline:2px solid var(--ga-accent);outline-offset:2px}
+#gakuactors-preview .ga-layout{display:grid;grid-template-columns:190px 1fr;min-height:330px}
+#gakuactors-preview aside{padding:20px 14px;border-right:1px solid var(--ga-line)}#gakuactors-preview .ga-label{font-size:12px;color:var(--ga-muted);margin:0 0 10px 5px}
+#gakuactors-preview input,#gakuactors-preview select{font:inherit;width:100%;min-width:0;border:1px solid var(--ga-line);padding:10px;border-radius:9px;color:var(--ga-fg);background:var(--ga-panel)}
+#gakuactors-preview nav{display:flex;gap:4px;margin:11px 0}#gakuactors-preview nav button{font-size:11px;padding:6px 8px;border:0;background:transparent}
+#gakuactors-preview nav button[aria-pressed="true"]{background:var(--ga-blue)}
+#gakuactors-preview .ga-characters{display:grid;gap:6px}#gakuactors-preview .ga-character{display:flex;align-items:center;gap:9px;text-align:left;width:100%;padding:10px 8px;background:transparent;border-color:transparent}
+#gakuactors-preview .ga-character[aria-pressed="true"]{background:var(--ga-blue);border-color:var(--ga-line)}
+#gakuactors-preview .ga-avatar{display:grid;place-items:center;width:35px;height:35px;border-radius:50%;background:var(--ga-panel);border:2px solid var(--ga-line);font-size:13px;font-weight:600;flex-shrink:0}
+#gakuactors-preview .ga-character[aria-pressed="true"] .ga-avatar{border-color:var(--ga-accent)}
+#gakuactors-preview .ga-character-name{font-size:13px}#gakuactors-preview small{display:block;font-size:10px;color:var(--ga-muted);margin-top:2px}
+#gakuactors-preview main{padding:22px;min-width:0}#gakuactors-preview .ga-title{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:20px}
+#gakuactors-preview .ga-secondary{font-size:11px;color:var(--ga-muted)}#gakuactors-preview .ga-new{font-size:12px;white-space:nowrap}
+#gakuactors-preview .ga-presets{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+#gakuactors-preview .ga-preset{border:1px solid var(--ga-line);background:var(--ga-panel);border-radius:12px;padding:15px;min-width:0}
+#gakuactors-preview .ga-preset-name{font-size:14px;font-weight:600;margin:10px 0 12px;overflow-wrap:anywhere}
+#gakuactors-preview .ga-badge{font-size:10px;color:var(--ga-muted);background:var(--ga-blue);border-radius:5px;padding:3px 6px}
+#gakuactors-preview .ga-part-row{display:flex;justify-content:space-between;gap:10px;margin:7px 0;font-size:11px}#gakuactors-preview .ga-part-row span:first-child{color:var(--ga-muted)}
+#gakuactors-preview .ga-add{width:100%;margin-top:12px;font-size:12px;background:var(--ga-blue);border:0}
+#gakuactors-preview .ga-primary{background:var(--ga-accent);color:var(--ga-accent-text);border-color:transparent;font-size:12px;font-weight:600}
+#gakuactors-preview .ga-rule{display:flex;align-items:center;gap:7px;color:var(--ga-muted);font-size:11px;margin-top:18px}#gakuactors-preview .ga-rule svg{width:14px;height:14px;flex-shrink:0}
+#gakuactors-preview .ga-editor{background:var(--ga-panel);border:1px solid var(--ga-line);border-radius:12px;padding:17px;margin-top:15px}
+#gakuactors-preview .ga-editor-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}#gakuactors-preview .ga-cancel{padding:3px 9px;border:0;font-size:18px}
+#gakuactors-preview label{display:block;font-size:11px;color:var(--ga-muted)}#gakuactors-preview label input,#gakuactors-preview label select{margin-top:6px;font-size:12px}
+#gakuactors-preview .ga-parts{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:13px}#gakuactors-preview .ga-save-row{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:16px}
+#gakuactors-preview .ga-scene{padding:18px 24px;border-top:1px solid var(--ga-line);background:var(--ga-panel)}
+#gakuactors-preview .ga-scene-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:14px}#gakuactors-preview .ga-count{font-size:11px;color:var(--ga-muted);font-weight:400;margin-left:6px}
+#gakuactors-preview .ga-scene-list{display:flex;gap:8px;flex-wrap:wrap}#gakuactors-preview .ga-scene-person{border:1px solid var(--ga-line);padding:9px 12px;border-radius:9px;display:flex;gap:14px;align-items:center;font-size:12px;max-width:100%;overflow-wrap:anywhere}
+#gakuactors-preview .ga-remove{border:0;padding:2px 5px;color:var(--ga-muted);font-size:11px}#gakuactors-preview .ga-notice{font-size:11px;color:var(--ga-muted);margin-top:12px;min-height:17px}
+#gakuactors-preview footer{display:flex;justify-content:space-between;gap:10px;padding:12px 24px;font-size:10px;color:var(--ga-muted);border-top:1px solid var(--ga-line)}#gakuactors-preview .ga-status-dot{display:inline-block;width:6px;height:6px;background:var(--ga-accent);border-radius:50%;margin-right:4px}
+@media(max-width:560px){#gakuactors-preview header{padding:18px}#gakuactors-preview .ga-layout{grid-template-columns:1fr}#gakuactors-preview aside{border-right:0;border-bottom:1px solid var(--ga-line);padding:14px}#gakuactors-preview .ga-characters{grid-template-columns:repeat(2,minmax(0,1fr))}#gakuactors-preview main{padding:17px}#gakuactors-preview .ga-title{align-items:flex-start}#gakuactors-preview .ga-tag{white-space:normal;font-size:10px}#gakuactors-preview .ga-presets{grid-template-columns:1fr}#gakuactors-preview .ga-parts{grid-template-columns:1fr}#gakuactors-preview .ga-scene{padding:17px}#gakuactors-preview .ga-save-row{align-items:flex-start}#gakuactors-preview footer{padding:12px 17px}}
+</style>
+<script>
+(()=>{
+ const root=document.getElementById('gakuactors-preview');
+ const people=[{id:'hski',name:'花海咲季',short:'咲',kind:'偶像',bodies:['默认服装','校服（示例）'],heads:['默认发型','发型预设（示例）']},{id:'ttmr',name:'月村手毬',short:'毬',kind:'偶像',bodies:['默认服装','演出服（示例）'],heads:['默认发型','发型预设（示例）']},{id:'shro',name:'筱泽广',short:'广',kind:'偶像',bodies:['默认服装'],heads:['默认发型']},{id:'teacher',name:'老师',short:'师',kind:'特殊人物',bodies:['原生老师身体'],heads:['原生老师头部']},{id:'vocal',name:'歌唱训练员',short:'歌',kind:'特殊人物',bodies:['原生训练员身体'],heads:['原生训练员头部']},{id:'dance',name:'舞蹈训练员',short:'舞',kind:'特殊人物',bodies:['原生训练员身体'],heads:['原生训练员头部']}];
+ let selected='hski',filter='all',serial=1;
+ const saved=window.openai?.widgetState;
+ let presets=Array.isArray(saved?.privateContent?.presets)?saved.privateContent.presets:[];
+ let actors=[{instance:0,name:'花海咲季',owned:false}];
+ const q=s=>root.querySelector(s),esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const current=()=>people.find(p=>p.id===selected);
+ function remember(){if(window.openai?.setWidgetState)window.openai.setWidgetState({modelContent:{selectedCharacter:current().name,presets:presets.map(p=>({name:p.name,character:p.character,body:p.body,head:p.head}))},privateContent:{presets}}).catch(()=>{});}
+ function renderPeople(){const search=q('.ga-search').value; q('.ga-characters').innerHTML=people.filter(p=>(filter!=='special'||p.kind==='特殊人物')&&p.name.includes(search)).map(p=>`<button class="ga-character" data-person="${p.id}" aria-pressed="${p.id===selected}"><span class="ga-avatar">${p.short}</span><span class="ga-character-name">${p.name}<small>${p.kind}</small></span></button>`).join('');}
+ function renderPresets(){const p=current();q('.ga-person-name').textContent=p.name;const list=[{id:'default',name:p.name+' · 默认',character:p.id,body:p.bodies[0],head:p.heads[0],builtin:true},...presets.filter(x=>x.character===p.id)];q('.ga-presets').innerHTML=list.map(x=>`<article class="ga-preset"><span class="ga-badge">${x.builtin?'游戏默认':'自定义预设'}</span><div class="ga-preset-name">${esc(x.name)}</div><div class="ga-part-row"><span>身体</span><span>${esc(x.body)}</span></div><div class="ga-part-row"><span>头部</span><span>${esc(x.head)}</span></div><button class="ga-add" data-preset="${x.id}">＋ 加入场景</button></article>`).join('');}
+ function renderScene(){q('.ga-count').textContent=actors.length;q('.ga-scene-list').innerHTML=actors.map(a=>`<div class="ga-scene-person"><span>${esc(a.name)}<small>${a.owned?'新增 · 与主角色重叠':'主角色'}</small></span>${a.owned?`<button class="ga-remove" data-remove="${a.instance}" aria-label="移除 ${esc(a.name)}">移除</button>`:''}</div>`).join('');}
+ root.addEventListener('click',event=>{const button=event.target.closest('button');if(!button)return;
+  if(button.dataset.person){selected=button.dataset.person;q('.ga-editor').hidden=true;renderPeople();renderPresets();remember();}
+  if(button.dataset.filter){filter=button.dataset.filter;root.querySelectorAll('[data-filter]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));renderPeople();}
+  if(button.classList.contains('ga-new')){const p=current(),form=q('.ga-editor');form.hidden=false;form.elements.presetName.value=p.name+' · 自定义';for(const key of ['body','head'])form.elements[key].innerHTML=p[key==='body'?'bodies':'heads'].map(x=>`<option>${esc(x)}</option>`).join('');form.elements.presetName.focus();}
+  if(button.classList.contains('ga-cancel'))q('.ga-editor').hidden=true;
+  if(button.dataset.preset){const p=current(),x=button.dataset.preset==='default'?{name:p.name+' · 默认'}:presets.find(x=>x.id===button.dataset.preset);if(x){actors.push({instance:serial++,name:x.name,owned:true});renderScene();q('.ga-notice').textContent='已演示加入 '+x.name+'，初始位置与主角色重叠。';}}
+  if(button.dataset.remove){actors=actors.filter(a=>a.instance!==Number(button.dataset.remove));renderScene();q('.ga-notice').textContent='已演示移除新增人物，预设仍保留。';}
+ });
+ q('.ga-search').addEventListener('input',renderPeople);
+ q('.ga-editor').addEventListener('submit',event=>{event.preventDefault();const f=event.currentTarget;const name=f.elements.presetName.value.trim();if(!name)return;presets.push({id:'p'+Date.now()+'-'+serial++,name,character:selected,body:f.elements.body.value,head:f.elements.head.value});f.hidden=true;renderPresets();q('.ga-notice').textContent='预设已保存在本次设计预览中，可点击加入场景。';remember();});
+ renderPeople();renderPresets();renderScene();
+ if(globalThis.Tweak){const design={radius:18,accent:'#f58a32'};const render=()=>{root.style.setProperty('--ga-round',design.radius+'px');root.style.setProperty('--ga-accent',design.accent);};const tweak=new Tweak({container:root,onChange:render});tweak.addSlider(design,'radius',{label:'窗口圆角',min:6,max:24,unit:'px'});tweak.addColorPicker(design,'accent',{label:'强调色',reference:'--ga-accent'});}
+})();
+</script>
