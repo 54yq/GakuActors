@@ -125,6 +125,10 @@ static void TickImpl(void* context,float) {
         }
         if(next.admitted&&s.catalogRequested) {
             s.catalogRequested=false;
+            // Explicit, admitted-scene diagnostics describe metadata and read
+            // existing models only. Never run cache updates to learn a type.
+            try{s.native.DiagnoseContracts();}catch(const std::exception& e){Log(s,std::string("Diagnostic contracts unavailable: ")+e.what(),GAKU_LOG_WARNING);}
+            try{s.native.DiagnoseActors();}catch(const std::exception& e){Log(s,std::string("Diagnostic actors unavailable: ")+e.what(),GAKU_LOG_WARNING);}
             Log(s,"Catalog request BEGIN (explicit user action, admitted scene)");
             try{auto catalog=s.native.ScanCatalog();catalog.revision=next.catalog.revision+1;next.catalog=std::move(catalog);s.catalogRead=true;Log(s,"Game master catalog read: "+std::to_string(next.catalog.characters.size())+" characters, "+std::to_string(next.catalog.bodies.size())+" bodies, "+std::to_string(next.catalog.heads.size())+" heads");
                 s.modelQueue.clear();s.modelCursor=0;s.modelFailures=0;
@@ -207,7 +211,7 @@ static void Shutdown(void* context) noexcept {
 extern "C" GAKU_PLUGIN_EXPORT GakuStatus GakuPlugin_Query(uint32_t version,uint32_t bytes,GakuPluginDescriptor* output) {
     if(version!=GAKU_ABI_VERSION)return GAKU_E_VERSION;
     if(!output)return GAKU_E_INVALID_ARGUMENT;if(bytes<sizeof(*output))return GAKU_E_SIZE;
-    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.1.3-recovery",
+    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.1.4-diagnostics",
         GakuActors::Activate,GakuActors::RuntimeReady,GakuActors::Tick,GakuActors::ActorTick,GakuActors::Desktop,GakuActors::Shutdown};
     return GAKU_OK;
 }

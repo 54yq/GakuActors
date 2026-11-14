@@ -53,6 +53,7 @@ public:
         if(ImGui::Button("读取游戏目录"))commands.push_back({Action::Scan});
         ImGui::EndDisabled();
         ImGui::SameLine();if(ImGui::Button("重新读取预设"))commands.push_back({Action::Reload});
+        ImGui::TextWrapped("读取目录时同时记录只读诊断：原生接口签名和现有角色模型／骨骼状态，可在同一次运行中重复读取。");
         ImGui::TextWrapped("%s",s.catalog.notice.c_str());
         if(!s.notice.empty())ImGui::TextWrapped("%s",s.notice.c_str());
         ImGui::Spacing();ImGui::Separator();

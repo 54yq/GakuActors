@@ -47,6 +47,11 @@ class NativeApi {
     void* (*handleTarget_)(void*){};
     void (*freeHandle_)(void*){};
     int (*valueSize_)(void*,uint32_t*){};
+    char* (*typeName_)(const void*){};
+    void (*il2cppFree_)(void*){};
+    const void* (*fields_)(void*,void**){};
+    const char* (*fieldName_)(const void*){};
+    void* (*fieldType_)(const void*){};
     std::vector<void*> frameRoots_;
     int admittedScene_{};
     const void* activeSceneMethod_{};
@@ -95,6 +100,10 @@ public:
             Export(newHandle_,"il2cpp_gchandle_new")&&Export(handleTarget_,"il2cpp_gchandle_get_target")&&
             Export(valueSize_,"il2cpp_class_value_size")&&Export(freeHandle_,"il2cpp_gchandle_free");
         if(!ok){module_=nullptr;notice="当前 IL2CPP 导出不完整";}
+        // Optional read-only diagnostics must not affect normal startup.
+        Export(typeName_,"il2cpp_type_get_name");Export(il2cppFree_,"il2cpp_free");
+        Export(fields_,"il2cpp_class_get_fields");Export(fieldName_,"il2cpp_field_get_name");
+        Export(fieldType_,"il2cpp_field_get_type");
         return ok;
     }
     void* Class(const char* ns,const char* name) {
@@ -106,6 +115,72 @@ public:
     std::string ClassName(void* klass) {
         if(!klass)return {};
         return std::string(classNamespace_(klass))+"."+className_(klass);
+    }
+    std::string TypeName(void* type) {
+        if(!type)return "<missing>";
+        if(!typeName_||!il2cppFree_)return "<type-name export unavailable>";
+        char* raw=typeName_(type);if(!raw)return "<unknown>";
+        struct Free {char* value;void(*release)(void*);~Free(){release(value);}} free{raw,il2cppFree_};
+        return std::string(raw);
+    }
+    void TraceSignature(const char* owner,const void* method) {
+        if(!method)return;
+        uint32_t impl{};
+        std::string line="Diagnostic contract: "+std::string(owner)+"::"+methodName_(method)+"(";
+        const auto count=methodCount_(method);if(count>64)throw std::runtime_error("诊断参数数异常");
+        for(uint32_t i=0;i<count;++i){if(i)line+=", ";line+=TypeName(param_(method,i));}
+        line+=") -> "+TypeName(result_(method));
+        line+=((methodFlags_(method,&impl)&0x10)?" [static]":" [instance]");Trace(line.c_str());
+    }
+    void TraceTypeShape(void* klass) {
+        if(!klass)return;
+        const auto owner=TypeName(const_cast<void*>(classType_(klass)));
+        Trace(("Diagnostic result shape: "+owner).c_str());
+        if(!fields_||!fieldName_||!fieldType_){Trace("Diagnostic fields: optional exports unavailable");return;}
+        void* it=nullptr;size_t count=0;
+        while(const void* field=fields_(klass,&it)) {
+            if(++count>64){Trace("Diagnostic fields: truncated at 64");break;}
+            const char* name=fieldName_(field);
+            Trace(("Diagnostic field: "+owner+"::"+(name?name:"<unnamed>")+" -> "+TypeName(fieldType_(field))).c_str());
+        }
+        // Inspect metadata only; do not call getters, GetAwaiter or GetResult.
+        for(const char* getter:{"get_Index","get_index","get_IsSuccess","get_IsGenerating"})
+            TraceSignature(owner.c_str(),Method(klass,getter,0));
+    }
+    void TraceTaskContract(const void* update) {
+        if(!update)return;
+        void* task=fromType_(result_(update));
+        if(!task)return;
+        const auto awaiter=Method(task,"GetAwaiter",0);TraceSignature("task",awaiter);
+        if(!awaiter)return;
+        void* awaiterClass=fromType_(result_(awaiter));
+        const auto result=Method(awaiterClass,"GetResult",0);TraceSignature("awaiter",result);
+        if(result)TraceTypeShape(fromType_(result_(result)));
+    }
+    bool DiagnoseContracts() {
+        if(!PerformanceScene())return false;
+        Trace("Diagnostic contracts BEGIN (metadata only; no creation/update/destruction invoked)");
+        const auto utility=Class("Campus.Common","CampusActorUtility");
+        const auto manager=Class("Campus.Common","CampusActorManager");
+        const auto actor=Class("Campus.Common","CampusActorController");
+        struct Target {void* klass;const char* label;std::vector<const char*> names;};
+        for(const auto& target:std::vector<Target>{
+            {utility,"CampusActorUtility",{"UpdateCacheActorAsync","CreateActorDescriptor"}},
+            {manager,"CampusActorManager",{"CreateActor","UpdateActorAsync","SafeUpdateActorAsync","UpdateCacheActorAsync","GetFreeActorIndex","ContainsActor","GetActor","GetActorList","TryDestroyActor","DestroyActor"}},
+            {actor,"CampusActorController",{"BuildAsync","get_descriptor","get_settings","get_index","GetModelPartsList","GetBuildResources","get_IsBuildSuccess"}}}) {
+            size_t depth=0,total=0;
+            for(void* c=target.klass;c&&depth++<24;c=parent_(c)) {
+                void* it=nullptr;
+                while(const void* method=methods_(c,&it)) {
+                    if(++total>8192)throw std::runtime_error("诊断方法数量异常");
+                    const char* name=methodName_(method);if(!name)continue;
+                    if(std::none_of(target.names.begin(),target.names.end(),[&](const char* n){return std::strcmp(n,name)==0;}))continue;
+                    TraceSignature(target.label,method);
+                    if(!std::strcmp(name,"UpdateActorAsync")||!std::strcmp(name,"UpdateCacheActorAsync"))TraceTaskContract(method);
+                }
+            }
+        }
+        Trace("Diagnostic contracts END");return true;
     }
     // Most-derived declaration wins; ambiguous overloads fail closed. Exact
     // primitive argument types are checked before potentially mutating calls.
@@ -347,38 +422,63 @@ public:
     bool StartSpawn(const Preset&,int) {return RejectMutation("spawn");}
     bool RemoveActor(int) {return RejectMutation("remove");}
     bool MoveActor(int,const float*) {return RejectMutation("move");}
-    ModelReadiness InspectModel(void* actor) {
-        ModelReadiness state;state.buildSuccess=Bool(actor,"get_IsBuildSuccess");state.rendererActive=Bool(actor,"IsRendererActive");
-        Pin parts(*this,Call(On(actor,"GetModelPartsList"),actor));
-        for(void* part:Items(parts.Get())) {
-            ++state.parts;
-            std::string name=Text(part,"get_assetName");
-            if(name.empty())name=Text(part,"get_name");
-            if(On(part,"get_gameObject")){void* go=GameObject(part);name+=" "+Text(go,"get_name");}
-            Trace(("Spawn built model part: "+name).c_str());
-            for(auto& c:name)c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            state.bodyPart|=name.find("_body")!=std::string::npos||name.find("geo_body")!=std::string::npos;
-            state.facePart|=name.find("_face")!=std::string::npos||name.find("geo_face")!=std::string::npos;
+    bool DiagnoseActors() {
+        const int scene=PerformanceScene();if(!scene)return false;
+        Trace(("Diagnostic actors BEGIN: owner_scene="+std::to_string(scene)+" (read only; no humanoid bone lookup)").c_str());
+        size_t count=0;std::vector<void*> shapes;
+        for(void* actor:Objects(Class("Campus.Common","CampusActorController"))) {
+            int instance=0;
+            try {
+                void* go=GameObject(actor);if(SceneOf(go)!=scene)continue;
+                instance=Int(actor,"GetInstanceID");
+                if(++count>64){Trace("Diagnostic actors: truncated at 64");break;}
+                Trace(("Diagnostic actor: instance="+std::to_string(instance)+" scene="+std::to_string(scene)+" index="+std::to_string(Int(actor,"get_index"))+" name="+Text(go,"get_name")+" active="+std::to_string(Bool(go,"get_activeInHierarchy"))+" build="+std::to_string(Bool(actor,"get_IsBuildSuccess"))+" renderer_active="+std::to_string(Bool(actor,"IsRendererActive"))).c_str());
+                try {
+                    Pin descriptor(*this,Call(On(actor,"get_descriptor"),actor));
+                    Trace(("Diagnostic actor resources: instance="+std::to_string(instance)+" unique="+Text(descriptor.Get(),"get_uniqueId")+" body="+Text(descriptor.Get(),"get_body")+" face="+Text(descriptor.Get(),"get_face")+" hair="+Text(descriptor.Get(),"get_hair")).c_str());
+                } catch(const std::exception& e){Trace(("Diagnostic descriptor unavailable: instance="+std::to_string(instance)+" reason="+e.what()).c_str());}
+                try {
+                    Pin parts(*this,Call(On(actor,"GetModelPartsList"),actor));
+                    Trace(("Diagnostic parts collection: instance="+std::to_string(instance)+" type="+(parts.Get()?TypeName(const_cast<void*>(classType_(objectClass_(parts.Get())))):"<null>")).c_str());
+                    int partCount=0,boneEntries=0;
+                    for(void* part:Items(parts.Get())) {
+                        ++partCount;const int bones=Int(part,"get_boneCount");boneEntries+=bones;
+                        Trace(("Diagnostic native part: instance="+std::to_string(instance)+" asset="+Text(part,"get_assetName")+" parts_id="+Text(part,"get_partsId")+" bone_entries="+std::to_string(bones)+" renderer_active="+std::to_string(Bool(part,"get_rendererActive"))).c_str());
+                        void* klass=objectClass_(part);
+                        // Describe all inherited part fields once per class;
+                        // their types identify native VL skinning structures.
+                        for(size_t depth=0;klass&&depth<8;++depth,klass=parent_(klass)) {
+                            if(std::find(shapes.begin(),shapes.end(),klass)!=shapes.end())continue;
+                            shapes.push_back(klass);TraceTypeShape(klass);
+                        }
+                    }
+                    Trace(("Diagnostic native parts summary: instance="+std::to_string(instance)+" parts="+std::to_string(partCount)+" bone_entries="+std::to_string(boneEntries)+" (entries across parts; not unique humanoid bones)").c_str());
+                } catch(const std::exception& e){Trace(("Diagnostic native parts unavailable: instance="+std::to_string(instance)+" reason="+e.what()).c_str());}
+                try {
+                    void* rendererClass=Class("UnityEngine","SkinnedMeshRenderer");
+                    const auto components=Method(objectClass_(actor),"GetComponentsInChildren",2,false,{0x12,2});
+                    if(!rendererClass||!components)throw std::runtime_error("Unity 蒙皮查询接口不可用");
+                    Pin type(*this,typeObject_(classType_(rendererClass)));bool inactive=true;void* args[]{type.Get(),&inactive};
+                    Pin array(*this,Call(components,actor,args));
+                    const auto n=array.Get()?arrayLength_(array.Get()):0;if(n>1024)throw std::runtime_error("Unity 蒙皮渲染器数量异常");
+                    auto items=array.Get()?reinterpret_cast<void**>(static_cast<char*>(array.Get())+4*sizeof(void*)):nullptr;
+                    int meshes=0,vertices=0,materials=0,bones=0;
+                    for(uintptr_t i=0;i<n;++i)if(items[i]) {
+                        void* renderer=items[i];Pin mesh(*this,Call(On(renderer,"get_sharedMesh"),renderer));
+                        if(!mesh.Get())continue;
+                        Pin mats(*this,Call(On(renderer,"get_sharedMaterials"),renderer));
+                        Pin boneArray(*this,Call(On(renderer,"get_bones"),renderer));
+                        const auto mc=mats.Get()?arrayLength_(mats.Get()):0,bc=boneArray.Get()?arrayLength_(boneArray.Get()):0;
+                        if(mc>256||bc>16384)throw std::runtime_error("Unity 材质或骨骼数量异常");
+                        const int vc=Int(mesh.Get(),"get_vertexCount");
+                        ++meshes;vertices+=vc;materials+=static_cast<int>(mc);bones+=static_cast<int>(bc);
+                        Trace(("Diagnostic Unity mesh: instance="+std::to_string(instance)+" name="+Text(mesh.Get(),"get_name")+" vertices="+std::to_string(vc)+" materials="+std::to_string(mc)+" bone_entries="+std::to_string(bc)).c_str());
+                    }
+                    Trace(("Diagnostic Unity meshes summary: instance="+std::to_string(instance)+" meshes="+std::to_string(meshes)+" vertices="+std::to_string(vertices)+" materials="+std::to_string(materials)+" bone_entries="+std::to_string(bones)+" (does not cover all native VL skinning; zero alone is not a load failure)").c_str());
+                } catch(const std::exception& e){Trace(("Diagnostic Unity meshes unavailable: instance="+std::to_string(instance)+" reason="+e.what()).c_str());}
+            } catch(const std::exception& e){Trace(("Diagnostic actor unavailable: instance="+std::to_string(instance)+" reason="+e.what()).c_str());}
         }
-        void* rendererClass=Class("UnityEngine","SkinnedMeshRenderer");
-        const auto components=Method(objectClass_(actor),"GetComponentsInChildren",2,false,{0x12,2});
-        if(!rendererClass||!components)throw std::runtime_error("模型蒙皮渲染器检查接口不可用");
-        Pin type(*this,typeObject_(classType_(rendererClass)));bool inactive=true;void* args[]{type.Get(),&inactive};
-        Pin array(*this,Call(components,actor,args));if(!array.Get())return state;
-        const auto count=arrayLength_(array.Get());if(count>1024)throw std::runtime_error("人物渲染器数量超出检查范围");
-        auto items=reinterpret_cast<void**>(static_cast<char*>(array.Get())+4*sizeof(void*));
-        for(uintptr_t i=0;i<count;++i)if(items[i]) {
-            void* renderer=items[i];
-            Pin mesh(*this,Call(On(renderer,"get_sharedMesh"),renderer));if(!mesh.Get())continue;
-            const int vertices=Int(mesh.Get(),"get_vertexCount");if(vertices<=0)continue;
-            Pin materials(*this,Call(On(renderer,"get_sharedMaterials"),renderer));
-            Pin bones(*this,Call(On(renderer,"get_bones"),renderer));
-            const auto materialCount=materials.Get()?arrayLength_(materials.Get()):0;
-            const auto boneCount=bones.Get()?arrayLength_(bones.Get()):0;
-            if(materialCount>256||boneCount>16384)throw std::runtime_error("人物材质或骨骼数量异常");
-            ++state.meshes;state.vertices+=vertices;state.materials+=static_cast<int>(materialCount);state.bones+=static_cast<int>(boneCount);
-        }
-        return state;
+        Trace(("Diagnostic actors END: inspected="+std::to_string((std::min)(count,size_t{64}))).c_str());return true;
     }
     void SuspendScene() {
         admittedScene_=0;
