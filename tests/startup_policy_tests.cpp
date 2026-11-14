@@ -18,6 +18,15 @@ int main() {
     assert(s.modelQueue.empty()); // no deferred model resolution leaks into startup
     s.commands.push_back({Action::Spawn,Preset{"id","test","hski","body","head"},1});
     TickImpl(&s,.016f);
-    assert(s.native.owned.empty()&&s.native.pending.task==nullptr);
-    std::cout<<"Actual plugin startup pump: 120 frames, denied scan and denied spawn; zero game API pointers required\n";
+    assert(!s.snapshot.mutationsEnabled);
+    for(int i=0;i<128;++i) {
+        s.commands.push_back({Action::Spawn,Preset{"id","test","hume","body","head"},1});
+        s.commands.push_back({Action::Remove,{},1});
+        s.commands.push_back({Action::Move,{},1,{1,2,3}});
+    }
+    TickImpl(&s,.016f);
+    assert(s.native.notice==NativeApi::MutationBlockReason());
+    s.native.SuspendScene();s.native.Shutdown();
+    assert(s.native.PerformanceScene()==0&&!s.snapshot.mutationsEnabled);
+    std::cout<<"Actual plugin startup pump: 120 frames, repeated spawn/remove/move and lifecycle; zero game API pointers required\n";
 }

@@ -18,10 +18,20 @@ struct NativeApiTestAccess {
         api.Call(method);check(received==nullptr);
         bool rejected=false;try{api.Call(nullptr,object);}catch(const std::exception&){rejected=true;}check(rejected);
         exception=true;rejected=false;try{api.Call(method,object);}catch(const std::exception&){rejected=true;}check(rejected);
-        // An official actor cannot be destroyed simply by forging its instance
-        // ID in a UI command; no native method is entered without ownership.
+        // Recovery policy must hold below the UI, with a valid preset, an
+        // admitted scene and repeated commands. All game API pointers are null:
+        // reaching any native operation would fail the test immediately.
         received=nullptr;check(!api.RemoveActor(123));check(received==nullptr);
         check(!api.StartSpawn(Preset{},123));check(received==nullptr);
+        NativeApi recovery;recovery.SetAdmittedScene(7);
+        Preset valid{"id","test","hume","hume-cstm-0000","costume_head_hume-cstm-0000"};
+        check(!recovery.MutationsEnabled());
+        for(int i=0;i<128;++i)check(!recovery.StartSpawn(valid,123));
+        check(recovery.notice==NativeApi::MutationBlockReason());
+        check(!recovery.RemoveActor(123));
+        float position[]{1,2,3};check(!recovery.MoveActor(123,position));
+        recovery.SuspendScene();check(recovery.PerformanceScene()==0);
+        recovery.SetAdmittedScene(7);recovery.Shutdown();check(recovery.PerformanceScene()==0);
     }
 };
 }

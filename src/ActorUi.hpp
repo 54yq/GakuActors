@@ -11,12 +11,12 @@ struct Command { Action action; Preset preset; int instance{}; float position[3]
 struct UiSnapshot {
     Catalog catalog;std::vector<Preset> presets;std::vector<SceneActor> actors;
     std::string notice,storeNotice;bool writable{},busy{},playing{},runtime{};
-    bool admitted{};std::string admissionNotice{"仅在拍摄或 Live 场景启用"};
+    bool admitted{},mutationsEnabled{};std::string admissionNotice{"仅在拍摄或 Live 场景启用"};
 };
 class ActorUi {
     char search_[160]{},name_[192]{},bodyAsset_[320]{},faceAsset_[320]{},hairAsset_[320]{};
     std::string character_,selection_,editId_,body_,head_,factory_;
-    bool editor_{},advanced_{},special_{},experimental_{},crossCharacter_{};
+    bool editor_{},advanced_{},special_{},crossCharacter_{};
     int primary_{},positionActor_{};float position_[3]{};
     std::string selectedDelete_;
     uint64_t serial_{};
@@ -48,6 +48,7 @@ public:
         if(character_.empty()&&!s.catalog.characters.empty())character_=s.catalog.characters.front().id;
         if(std::none_of(s.actors.begin(),s.actors.end(),[&](const auto& a){return a.instance==primary_;}))primary_=s.actors.empty()?0:s.actors.front().instance;
         ImGui::TextUnformatted("场景人物管理");ImGui::SameLine();ImGui::TextDisabled("GakuActors · 独立插件");
+        if(!s.mutationsEnabled)ImGui::TextWrapped("保护模式：仅读取目录和编辑预设。人物新增、移除和移动已停用，等待独立实例加载修复。");
         ImGui::BeginDisabled(!s.admitted);
         if(ImGui::Button("读取游戏目录"))commands.push_back({Action::Scan});
         ImGui::EndDisabled();
@@ -90,7 +91,7 @@ public:
                     ImGui::TextWrapped("头部：%s",headLabel.c_str());
                 } else ImGui::TextDisabled("使用原生人物组合");
                 if(ImGui::Button(p.builtin?"另存为预设":"编辑"))BeginEdit(p,p.builtin);
-                ImGui::SameLine();ImGui::BeginDisabled(!experimental_||!s.runtime||s.busy||s.playing||!primary_);
+                ImGui::SameLine();ImGui::BeginDisabled(!s.mutationsEnabled||!s.runtime||s.busy||s.playing||!primary_);
                 if(ImGui::Button("加入场景"))commands.push_back({Action::Spawn,p,primary_});
                 ImGui::EndDisabled();
                 if(!p.builtin){ImGui::SameLine();if(ImGui::Button("删除预设")){selectedDelete_=p.id;ImGui::OpenPopup("删除人物预设");}}
@@ -161,8 +162,8 @@ public:
         }
         ImGui::EndChild();
         if(!s.storeNotice.empty())ImGui::TextWrapped("%s",s.storeNotice.c_str());
-        ImGui::Spacing();ImGui::Checkbox("启用实验人物加载",&experimental_);
-        ImGui::TextWrapped("新增人物与选定主角色重叠；加载和移除前请在动作插件中停止播放。当前加载流程尚未完成实机验收。");
+        ImGui::Spacing();
+        ImGui::TextWrapped("目录和资源名称仅代表定义可读取，不代表身体、头部或骨骼已加载到场景。");
         std::string primaryLabel="请选择主角色";
         for(const auto& a:s.actors)if(a.instance==primary_)primaryLabel=a.name;
         ImGui::SetNextItemWidth(-1);
@@ -174,12 +175,14 @@ public:
         for(const auto& a:s.actors) {
             ImGui::PushID(a.instance);ImGui::TextWrapped("%s · %s",a.name.c_str(),a.owned?"本插件新增":"游戏人物");
             if(a.owned) {
+                ImGui::BeginDisabled(!s.mutationsEnabled);
                 if(ImGui::Button("调整位置")){positionActor_=a.instance;std::memcpy(position_,a.position,sizeof(position_));}
                 ImGui::SameLine();ImGui::BeginDisabled(s.playing||s.busy);
                 if(ImGui::Button("移除人物"))commands.push_back({Action::Remove,{},a.instance});ImGui::EndDisabled();
                 if(positionActor_==a.instance&&ImGui::DragFloat3("世界位置",position_,.01f)) {
                     Command cmd{Action::Move,{},a.instance};std::memcpy(cmd.position,position_,sizeof(position_));commands.push_back(cmd);
                 }
+                ImGui::EndDisabled();
             }
             ImGui::PopID();
         }

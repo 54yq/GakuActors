@@ -83,7 +83,7 @@ static void TickImpl(void* context,float) {
     next.runtime=true;
     const auto now=std::chrono::steady_clock::now();
     auto publish=[&]{
-        next.busy=s.native.pending.task!=nullptr;next.notice=s.native.notice;
+        next.busy=false;next.mutationsEnabled=s.native.MutationsEnabled();next.notice=s.native.notice;
         next.presets=s.store.presets;next.storeNotice=s.store.notice;next.writable=s.store.Writable();
         std::lock_guard<std::mutex> lock(s.mutex);s.snapshot=std::move(next);
     };
@@ -98,9 +98,6 @@ static void TickImpl(void* context,float) {
             s.catalogRequested=false;s.sceneRequested=false;s.modelQueue.clear();s.modelCursor=0;next.actors.clear();next.playing=false;
             if(s.wasAdmitted){s.native.SuspendScene();Log(s,"Performance scene left; catalog/roster scanning suspended");}
             s.wasAdmitted=false;
-            // Completion of our own cancelled task is cleanup, not a scan or a
-            // load in an unsupported page. Never discard an in-flight awaiter.
-            if(s.native.pending.task)s.native.PollSpawn();
         } else {
             if(!s.wasAdmitted){Log(s,"Performance scene admitted; waiting for explicit Read Catalog request");s.native.notice="场景已就绪，点击读取游戏目录后使用人物管理";}
             s.wasAdmitted=true;
@@ -123,14 +120,7 @@ static void TickImpl(void* context,float) {
                 if(!next.admitted)break;
                 if(next.playing){s.native.notice="请先在动作插件中停止播放";break;}
                 s.native.RemoveActor(command.instance);s.nextScan={};break;
-            case Action::Move: {
-                const auto own=std::find_if(s.native.owned.begin(),s.native.owned.end(),[&](const auto& o){return o.instance==command.instance;});
-                if(!next.admitted||own==s.native.owned.end()||own->scene!=s.native.PerformanceScene())break;
-                bool finite=true;for(float v:command.position)finite&=std::isfinite(v)&&std::fabs(v)<10000;
-                if(!finite)break;
-                if(void* actor=s.native.FindActor(own->instance,own->scene)){float pos[3],rotation[4];s.native.Pose(actor,pos,rotation);s.native.SetPose(actor,command.position,rotation);}
-                break;
-            }
+            case Action::Move:s.native.MoveActor(command.instance,command.position);break;
             }
         }
         if(next.admitted&&s.catalogRequested) {
@@ -152,7 +142,6 @@ static void TickImpl(void* context,float) {
             next.catalog.notice="目录已读取；模型资源解析 "+std::to_string(s.modelCursor)+"/"+std::to_string(s.modelQueue.size())+"；资源定义不代表已加载人物";
             if(s.modelCursor==s.modelQueue.size())Log(s,"Model definitions complete: resolved="+std::to_string(next.catalog.models.size())+" skipped="+std::to_string(s.modelFailures));
         }
-        if(next.admitted)s.native.PollSpawn();
         if(next.admitted&&s.sceneRequested&&now>=s.nextScan){next.actors=s.native.ScanScene();s.nextScan=now+std::chrono::milliseconds(500);}
     } catch(const std::exception& e){s.native.notice=e.what();Log(s,e.what(),GAKU_LOG_WARNING);}
     s.native.EndFrame();
@@ -174,7 +163,7 @@ static void DesktopImpl(void* context) {
     ImGui::BeginDisabled(!snapshot.admitted);
     if(ImGui::Button("打开人物预设弹窗"))s.dialogOpen=true;
     ImGui::EndDisabled();
-    ImGui::TextWrapped("人物目录、头身预设、加入和移除场景人物。");
+    ImGui::TextWrapped("保护版：人物目录与头身预设；场景人物操作已停用。");
     if(s.dialogOpen&&snapshot.admitted) {
         const auto display=ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowSize(ImVec2((std::min)(960.0f,(std::max)(280.0f,display.x-32)),
@@ -218,7 +207,7 @@ static void Shutdown(void* context) noexcept {
 extern "C" GAKU_PLUGIN_EXPORT GakuStatus GakuPlugin_Query(uint32_t version,uint32_t bytes,GakuPluginDescriptor* output) {
     if(version!=GAKU_ABI_VERSION)return GAKU_E_VERSION;
     if(!output)return GAKU_E_INVALID_ARGUMENT;if(bytes<sizeof(*output))return GAKU_E_SIZE;
-    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.1.2-dev",
+    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.1.3-recovery",
         GakuActors::Activate,GakuActors::RuntimeReady,GakuActors::Tick,GakuActors::ActorTick,GakuActors::Desktop,GakuActors::Shutdown};
     return GAKU_OK;
 }

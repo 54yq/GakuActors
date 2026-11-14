@@ -61,13 +61,17 @@ public:
         Pin(const Pin&)=delete;
         void* Get()const{return handle?api->handleTarget_(handle):nullptr;}
     };
-    struct Owned { int instance{},scene{},manager{},index{}; std::string unique,preset; bool removing{}; };
-    struct Pending {
-        void* task{},*awaiter{},*cancellation{};int manager{},index{},scene{},reference{};bool cancelled{};
-        std::string unique,preset;float position[3]{},rotation[4]{0,0,0,1};
-        std::chrono::steady_clock::time_point started;
-    } pending;
-    std::vector<Owned> owned;
+    // Recovery build: no scene mutation path is compiled. Do not re-enable
+    // until allocation and ownership can be proven independently of game cache.
+    static constexpr bool MutationsEnabled(){return false;}
+    static constexpr const char* MutationBlockReason(){
+        return "保护模式：人物新增、移除和移动已停用；等待独立实例加载修复";
+    }
+    bool RejectMutation(const char* operation) {
+        notice=MutationBlockReason();
+        Trace((std::string("Scene mutation BLOCKED (recovery build): ")+operation).c_str());
+        return false;
+    }
     std::string notice{"等待游戏运行时"};
     bool Ready()const{return module_&&invoke_&&freeHandle_;}
     bool Resolve(void* module) {
@@ -205,46 +209,18 @@ public:
         if(!p||!r||valueSize_(objectClass_(p),&a)!=12||valueSize_(objectClass_(r),&a)!=16)throw std::runtime_error("角色位置结构不匹配");
         std::memcpy(position,unbox_(p),12);std::memcpy(rotation,unbox_(r),16);
     }
-    void SetPose(void* actor,const float* position,const float* rotation) {
-        void* transform=Call(On(actor,"get_transform"),actor);
-        const auto p=Method(objectClass_(transform),"set_position",1,false,{0x11});
-        const auto r=Method(objectClass_(transform),"set_rotation",1,false,{0x11});
-        if(!p||!r)throw std::runtime_error("角色站位接口不可用");
-        uint32_t a{};
-        if(valueSize_(fromType_(param_(p,0)),&a)!=12||valueSize_(fromType_(param_(r,0)),&a)!=16)throw std::runtime_error("角色站位参数布局不匹配");
-        void* pa[]{const_cast<float*>(position)},*ra[]{const_cast<float*>(rotation)};
-        Call(p,transform,pa);Call(r,transform,ra);
-    }
     std::vector<SceneActor> ScanScene() {
         std::vector<SceneActor> result;const int scene=PerformanceScene();
         if(!scene)return result;
-        std::vector<int> allInstances;
         for(void* actor:Objects(Class("Campus.Common","CampusActorController"))) {
-            allInstances.push_back(Int(actor,"GetInstanceID"));
             void* go=GameObject(actor);if(!Bool(go,"get_activeInHierarchy"))continue;
             const int actorScene=SceneOf(go);if(scene&&actorScene!=scene)continue;
             SceneActor entry;entry.instance=Int(actor,"GetInstanceID");entry.scene=actorScene;entry.name=Text(go,"get_name");
             if(scene)Pose(actor,entry.position,entry.rotation);
-            for(const auto& own:owned)if(own.instance==entry.instance&&own.scene==entry.scene){entry.owned=true;entry.preset=own.preset;}
             result.push_back(std::move(entry));
         }
-        // Object disappearance is confirmed by a fresh engine query, never by
-        // a failed scan or an old managed pointer. The cache belongs to the game.
-        for(auto it=owned.begin();it!=owned.end();) {
-            if(std::find(allInstances.begin(),allInstances.end(),it->instance)==allInstances.end()) {
-                if(Manager(it->manager))Destroy(*it);
-                it=owned.erase(it);
-            } else if(it->scene!=scene&&scene) {
-                if(!it->removing)it->removing=Destroy(*it);
-                ++it;
-            } else ++it;
-        }
+        // Observation never reconciles or releases game cache entries.
         return result;
-    }
-    void* FindActor(int instance,int scene) {
-        for(void* actor:Objects(Class("Campus.Common","CampusActorController")))
-            if(Int(actor,"GetInstanceID")==instance&&SceneOf(GameObject(actor))==scene&&Bool(GameObject(actor),"get_activeInHierarchy"))return actor;
-        return nullptr;
     }
     std::string Identity(void* record) {
         const auto method=On(record,"GetCharacter");
@@ -335,14 +311,6 @@ public:
         Trace("Catalog phase: optional special descriptors END");
         out.notice="已读取游戏人物、服装与头部目录；资源加载状态尚待验证";return out;
     }
-    void* Manager(int instance=0) {
-        void* found=nullptr;
-        for(void* m:Objects(Class("Campus.Common","CampusActorManager"))) {
-            if(instance){if(Int(m,"GetInstanceID")==instance)return m;}
-            else if(Bool(GameObject(m),"get_activeInHierarchy")){if(found)return nullptr;found=m;}
-        }
-        return instance?nullptr:found;
-    }
     void* Descriptor(const Preset& p) {
         if(!p.factory.empty())return Factory(p.factory);
         void* utility=Class("Campus.Common","CampusActorUtility");
@@ -376,91 +344,9 @@ public:
         if(model.body.empty()||model.face.empty()||model.hair.empty())throw std::runtime_error("原生描述未提供完整身体、脸、头发资源");
         return model;
     }
-    void ReleasePending() {
-        if(pending.cancellation) {
-            void* source=handleTarget_(pending.cancellation);
-            try{if(source)Call(On(source,"Dispose"),source);}catch(...){}
-            freeHandle_(pending.cancellation);
-        }
-        if(pending.task)freeHandle_(pending.task);if(pending.awaiter)freeHandle_(pending.awaiter);pending={};
-    }
-    bool Destroy(const Owned& own) {
-        void* manager=Manager(own.manager);if(!manager)return false;
-        const auto method=Method(objectClass_(manager),"TryDestroyActor",1,false,{0x0e});
-        if(!method)return false;
-        Pin id(*this,stringNew_(own.unique.c_str()));void* args[]{id.Get()};
-        // TryDestroyActor may report that an unloaded actor has already gone.
-        // A fresh scene scan confirms disappearance before ownership is dropped.
-        Call(method,manager,args);return true;
-    }
-    bool StartSpawn(const Preset& p,int reference) {
-        std::string error;if(!ValidatePreset(p,error)){notice=error;return false;}
-        if(pending.task){notice="正在加载人物，请稍候";return false;}
-        const int scene=PerformanceScene();if(!scene){notice="请先进入拍摄或 Live 场景";return false;}
-        if(owned.size()>=8){notice="实验版最多管理 8 个新增人物";return false;}
-        void* primary=FindActor(reference,scene);if(!primary){notice="主角色已变化，请重新选择";return false;}
-        void* manager=Manager();if(!manager){notice="无法唯一确认原生人物管理器";return false;}
-        const auto destroy=Method(objectClass_(manager),"TryDestroyActor",1,false,{0x0e});
-        // Use the manager's complete cache/load/build operation. Allocating a
-        // free index and calling its lower-level update can leave a bare actor.
-        const auto publicUpdate=Method(Class("Campus.Common","CampusActorUtility"),"UpdateCacheActorAsync",3,true,{0x12,2,0x11});
-        const auto update=publicUpdate?publicUpdate:Method(objectClass_(manager),"UpdateCacheActorAsync",2,false,{0x12,0x11});
-        const auto getActor=Method(objectClass_(manager),"GetActor",1,false,{8});
-        if(!destroy||!update||!getActor){notice="完整人物缓存加载／释放接口尚未匹配当前版本";Trace("Spawn rejected: UpdateCacheActorAsync or release/get actor method unavailable");return false;}
-        void* taskClass=fromType_(result_(update));
-        const auto getAwaiter=Method(taskClass,"GetAwaiter",0);
-        void* awaiterClass=getAwaiter?fromType_(result_(getAwaiter)):nullptr;
-        const auto completed=Method(awaiterClass,"get_IsCompleted",0);
-        if(!getAwaiter||!completed||typeCode_(result_(completed))!=2||!Method(awaiterClass,"GetResult",0)) {
-            notice="原生创建任务缺少可确认的完成接口，未创建人物";return false;
-        }
-        auto tokenClass=fromType_(param_(update,publicUpdate?2:1));uint32_t alignment{};
-        const int tokenSize=valueSize_(tokenClass,&alignment);
-        if(ClassName(tokenClass)!="System.Threading.CancellationToken"||tokenSize<1||tokenSize>64){notice="异步取消参数签名不匹配";return false;}
-        Pin descriptor(*this,Descriptor(p));
-        if(!descriptor.Get()||!assignable_(fromType_(param_(update,0)),objectClass_(descriptor.Get()))) {
-            notice="人物描述与原生管理器类型不兼容，未创建角色";return false;
-        }
-        const auto setUnique=descriptor.Get()?Method(objectClass_(descriptor.Get()),"set_uniqueId",1,false,{0x0e}):nullptr;
-        if(!setUnique){notice="无法设置独立人物身份，未创建角色";return false;}
-        static uint64_t serial{};const std::string unique="gakuactors-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(++serial);
-        Pin id(*this,stringNew_(unique.c_str()));void* idArgs[]{id.Get()};Call(setUnique,descriptor.Get(),idArgs);
-        const auto validation=Method(Class("Campus.Common","CampusActorUtility"),"ValidateDescriptor",1,true,{0x12});
-        if(validation&&typeCode_(result_(validation))==2) {
-            void* arguments[]{descriptor.Get()};void* valid=Call(validation,nullptr,arguments);
-            if(!valid||!*static_cast<bool*>(unbox_(valid))){notice="游戏拒绝此模型资源组合";Trace("Spawn rejected: native ValidateDescriptor=false");return false;}
-        }
-        const auto refs=std::string("Spawn resource request: category=")+p.character+" preset="+p.id+" body="+p.bodyAsset+" face="+p.faceAsset+" hair="+p.hairAsset+" costume="+p.body+" head="+p.head+" factory="+p.factory;
-        Trace(refs.c_str());
-        Pending next;next.scene=scene;next.reference=reference;next.manager=Int(manager,"GetInstanceID");next.unique=unique;next.preset=p.id;next.started=std::chrono::steady_clock::now();
-        Pose(primary,next.position,next.rotation);
-        void* sourceClass=Class("System.Threading","CancellationTokenSource");
-        Pin source(*this,sourceClass?objectNew_(sourceClass):nullptr);
-        if(!source.Get()||!On(source.Get(),".ctor")||!On(source.Get(),"Cancel")||!On(source.Get(),"Dispose"))throw std::runtime_error("无法建立可取消的创建任务");
-        Call(On(source.Get(),".ctor"),source.Get());
-        Pin token(*this,Call(On(source.Get(),"get_Token"),source.Get()));
-        if(!token.Get()||objectClass_(token.Get())!=tokenClass)throw std::runtime_error("取消令牌类型不匹配");
-        next.cancellation=newHandle_(source.Get(),false);if(!next.cancellation)throw std::runtime_error("无法保留取消令牌");
-        pending=next;
-        try {
-            bool initialRenderActive=true;
-            void* publicArgs[]{descriptor.Get(),&initialRenderActive,unbox_(token.Get())};
-            void* managerArgs[]{descriptor.Get(),unbox_(token.Get())};
-            Trace(publicUpdate?"Spawn pipeline: CampusActorUtility.UpdateCacheActorAsync(initialRenderActive=true)":"Spawn pipeline: CampusActorManager.UpdateCacheActorAsync");
-            void* task=Call(update,publicUpdate?nullptr:manager,publicUpdate?publicArgs:managerArgs);if(!task)throw std::runtime_error("创建任务为空");
-            Trace("Spawn native cache/load/build task started");
-            pending.task=newHandle_(task,false);if(!pending.task)throw std::runtime_error("无法保留角色创建任务");
-            void* awaiter=Call(On(task,"GetAwaiter"),task);
-            if(!awaiter)throw std::runtime_error("创建任务没有可观察的完成状态");
-            pending.awaiter=newHandle_(awaiter,false);
-            if(!pending.awaiter||!On(awaiter,"get_IsCompleted")||!On(awaiter,"GetResult"))throw std::runtime_error("创建任务签名不匹配");
-        } catch(...) {
-            try{void* cancel=handleTarget_(pending.cancellation);if(cancel)Call(On(cancel,"Cancel"),cancel);}catch(...){}
-            try{Destroy({0,pending.scene,pending.manager,pending.index,pending.unique,pending.preset});}catch(...){}
-            ReleasePending();throw;
-        }
-        notice="正在加载人物，完成后放到主角色位置";return true;
-    }
+    bool StartSpawn(const Preset&,int) {return RejectMutation("spawn");}
+    bool RemoveActor(int) {return RejectMutation("remove");}
+    bool MoveActor(int,const float*) {return RejectMutation("move");}
     ModelReadiness InspectModel(void* actor) {
         ModelReadiness state;state.buildSuccess=Bool(actor,"get_IsBuildSuccess");state.rendererActive=Bool(actor,"IsRendererActive");
         Pin parts(*this,Call(On(actor,"GetModelPartsList"),actor));
@@ -494,87 +380,14 @@ public:
         }
         return state;
     }
-    void PollSpawn() {
-        if(!pending.task)return;
-        if(PerformanceScene()!=pending.scene) {
-            if(!pending.cancelled) {
-                void* source=handleTarget_(pending.cancellation);
-                Call(On(source,"Cancel"),source);pending.cancelled=true;
-            }
-            notice="场景已变化，等待原生创建任务取消完成";
-        }
-        void* awaiter=handleTarget_(pending.awaiter);if(!awaiter)throw std::runtime_error("角色任务观察对象已丢失");
-        if(!Bool(awaiter,"get_IsCompleted")) {
-            if(std::chrono::steady_clock::now()-pending.started>std::chrono::seconds(60))notice="人物仍在加载，请勿切换场景；任务完成前不重复创建";
-            return;
-        }
-        bool reusedReference=false;
-        try {
-            Pin result(*this,Call(On(awaiter,"GetResult"),awaiter));
-            if(!result.Get())throw std::runtime_error("原生模型加载任务没有返回结果");
-            const auto success=On(result.Get(),"get_IsSuccess");
-            if(success&&!Bool(result.Get(),"get_IsSuccess"))throw std::runtime_error("原生资源加载结果 IsSuccess=false");
-            if(On(result.Get(),"get_IsGenerating")&&Bool(result.Get(),"get_IsGenerating"))throw std::runtime_error("任务返回时人物资源仍在生成");
-            if(On(result.Get(),"get_Index"))pending.index=Int(result.Get(),"get_Index");
-            else if(On(result.Get(),"get_index"))pending.index=Int(result.Get(),"get_index");
-            else throw std::runtime_error("加载结果不包含可确认的角色索引");
-            Trace(("Spawn native task completed: index="+std::to_string(pending.index)).c_str());
-            if(pending.cancelled){Destroy({0,pending.scene,pending.manager,pending.index,pending.unique,pending.preset});ReleasePending();notice="已取消人物加入";return;}
-            void* manager=Manager(pending.manager);if(!manager)throw std::runtime_error("人物管理器已变化");
-            int index=pending.index;void* args[]{&index};void* actor=Call(Method(objectClass_(manager),"GetActor",1,false,{8}),manager,args);
-            if(!actor)throw std::runtime_error("任务结束但角色没有创建成功");
-            void* expected=Class("Campus.Common","CampusActorController");
-            if(!expected||!assignable_(expected,objectClass_(actor)))throw std::runtime_error("新人物不是可识别的原生角色控制器");
-            if(Int(actor,"GetInstanceID")==pending.reference){reusedReference=true;throw std::runtime_error("原生缓存复用了主角色，已拒绝移动或登记，未新增人物");}
-            if(!Bool(actor,"get_IsBuildSuccess"))throw std::runtime_error("人物控制器存在，但游戏报告模型构建失败");
-            const auto rendererActive=Method(objectClass_(actor),"SetRendererActive",1,false,{2});
-            if(!rendererActive||!On(actor,"IsRendererActive"))throw std::runtime_error("人物原生渲染器接口不可用");
-            void* go=GameObject(actor);void* transform=Call(On(actor,"get_transform"),actor);
-            const auto detach=Method(objectClass_(transform),"SetParent",2,false,{0x12,2});
-            const auto move=Method(Class("UnityEngine.SceneManagement","SceneManager"),"MoveGameObjectToScene",2,true,{0x12,0x11});
-            const auto setActive=Method(objectClass_(go),"SetActive",1,false,{2});
-            uint32_t align{};
-            if(!detach||!move||!setActive||valueSize_(fromType_(param_(move,1)),&align)!=4)throw std::runtime_error("人物场景挂载接口不完整");
-            bool keepWorld=false;void* parentArgs[]{nullptr,&keepWorld};Call(detach,transform,parentArgs);
-            void* moveArgs[]{go,&pending.scene};Call(move,nullptr,moveArgs);
-            SetPose(actor,pending.position,pending.rotation);bool active=true;void* activeArgs[]{&active};Call(setActive,go,activeArgs);
-            Call(rendererActive,actor,activeArgs);
-            const auto evidence=InspectModel(actor);
-            std::string modelError;
-            Trace(("Spawn model evidence: build="+std::to_string(evidence.buildSuccess)+" parts="+std::to_string(evidence.parts)+" body="+std::to_string(evidence.bodyPart)+" face="+std::to_string(evidence.facePart)+" meshes="+std::to_string(evidence.meshes)+" vertices="+std::to_string(evidence.vertices)+" materials="+std::to_string(evidence.materials)+" bones="+std::to_string(evidence.bones)+" renderer_active="+std::to_string(evidence.rendererActive)).c_str());
-            if(!ValidateModelReadiness(evidence,modelError))throw std::runtime_error(modelError);
-            const int instance=Int(actor,"GetInstanceID");
-            if(SceneOf(go)!=pending.scene||!instance)throw std::runtime_error("新人物场景归属未确认");
-            owned.push_back({instance,pending.scene,pending.manager,pending.index,pending.unique,pending.preset});
-            notice="人物模型已构建并启用渲染，与主角色位置重叠；可在动作插件中识别和绑定";
-            Trace(("Spawn model READY: instance="+std::to_string(instance)+" scene="+std::to_string(pending.scene)+" preset="+pending.preset).c_str());
-        } catch(const std::exception& error) {
-            Trace((std::string("Spawn FAILED: ")+error.what()).c_str());
-            if(!reusedReference)try{Destroy({0,pending.scene,pending.manager,pending.index,pending.unique,pending.preset});}catch(...){}
-            ReleasePending();throw;
-        }
-        ReleasePending();
-    }
-    bool RemoveActor(int instance) {
-        const auto it=std::find_if(owned.begin(),owned.end(),[&](const auto& o){return o.instance==instance;});
-        if(it==owned.end()){notice="只允许移除本插件创建的人物";return false;}
-        if(!Destroy(*it)){notice="无法确认人物释放接口，未移除记录";return false;}
-        it->removing=true;notice="已请求移除人物，等待场景确认";return true;
-    }
     void SuspendScene() {
         admittedScene_=0;
-        if(pending.task&&!pending.cancelled) {
-            void* source=handleTarget_(pending.cancellation);
-            if(source){Call(On(source,"Cancel"),source);pending.cancelled=true;}
-        }
-        for(auto& o:owned)if(!o.removing)o.removing=Destroy(o);
         notice="当前页面休眠；进入拍摄或 Live 后可按需读取目录";
     }
     void Shutdown() {
-        if(!Ready())return;
-        if(pending.task){try{Destroy({0,pending.scene,pending.manager,pending.index,pending.unique,pending.preset});}catch(...){}ReleasePending();}
-        for(const auto& o:owned)try{Destroy(o);}catch(...){}
-        owned.clear();EndFrame();
+        // Release only our temporary GC roots. Never destroy scene objects or
+        // cancel game tasks during shutdown in the recovery build.
+        admittedScene_=0;EndFrame();
     }
 };
 }
