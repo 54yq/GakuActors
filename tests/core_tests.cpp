@@ -85,6 +85,25 @@ int main() {
     check(headChoices.size()==2);check(headChoices[0].label!=headChoices[1].label);
     check(ModelChoices(models,"hski",false,false).size()==1);
     check(ModelChoices(models,"hski",false,true).size()==2);
+    Catalog npc;
+    for(const auto& asset:{"mdl_chr_krnh-schl-0000_body","mdl_chr_krnh-base-0000_face","mdl_chr_krnh-base-0000_hair",
+                          "mdl_chr_hkne-casl-0000_body","mdl_chr_hkne-base-0000_face","mdl_chr_hkne-base-0000_hair"}) {
+        auto r=ParseModelResource(asset);check(r.has_value());check(AddModelResource(npc,*r));
+    }
+    check(npc.defaults.empty()&&npc.models.empty()); // NPC has no wearable costume or pre-paired head.
+    check(ResourceChoices(npc,"krnh","body").size()==1);check(ResourceChoices(npc,"krnh","face").size()==1);
+    check(ResourceChoices(npc,"hkne","hair").size()==1);check(ResourceChoices(npc,"hkne","hair",true).size()==2);
+    check(!ParseModelResource("mdl_chr_krnh-base-0000_face_diffuse"));check(!ParseModelResource("../mdl_chr_krnh-base-0000_face"));
+    check(!ParseModelResource("mdl_chr_krnh-base-0000_face.prefab"));check(!ParseModelResource("mdl_prp_krnh_body"));
+    auto part=*ParseModelResource("mdl_chr_krnh-base-0000_face");part.bundle="registered/face";part.source="Octo";
+    check(!AddModelResource(npc,part));check(ResourceChoices(npc,"krnh","face")[0].bundle=="registered/face");
+    const auto exact=LearnResourcePattern("mdl_chr_krnh-base-0000_face","3d/mdl_chr_krnh-base-0000_face.bundle");check(exact.has_value());
+    const auto found=ResourceFromBundle(*exact,"3d/mdl_chr_hkne-base-0000_face.bundle");check(found&&found->character=="hkne");
+    check(!ResourceFromBundle(*exact,"texture/mdl_chr_hkne-base-0000_face.bundle"));
+    check(!ResourceFromBundle(*exact,"3d/mdl_chr_hkne-base-0000_face_diffuse.bundle"));
+    const auto stem=LearnResourcePattern("mdl_chr_krnh-schl-0000_body","3d/model/krnh-schl-0000_body");check(stem.has_value());
+    check(ResourceFromBundle(*stem,"3d/model/hkne-casl-0000_body")->resource=="mdl_chr_hkne-casl-0000_body");
+    check(!LearnResourcePattern("mdl_chr_krnh-schl-0000_body","unrelated/hash"));
     raw.character="hski";raw.bodyAsset="mdl_chr_nasr-casl-0000_body";
     check(ValidatePreset(raw,error)); // classification never restricts model identity
     // This test owns exactly these files; no recursive deletion or user paths.

@@ -11,6 +11,7 @@ struct Character { std::string id, name; bool special{}; };
 struct Part { std::string id, name, character, resource; bool head{}; };
 struct ModelAssets {std::string character,body,face,hair,factory;};
 struct ModelChoice {std::string label,body,face,hair;};
+struct ModelResource {std::string character,kind,resource,source,bundle;};
 struct Preset {
     std::string id, name, character, body, head, factory;
     std::string bodyAsset, faceAsset, hairAsset;
@@ -21,8 +22,10 @@ struct Catalog {
     std::vector<Part> bodies, heads;
     std::vector<Preset> defaults;
     std::vector<ModelAssets> models;
+    std::vector<ModelResource> resources;
     uint64_t revision{};
     std::string notice{"等待游戏目录读取"};
+    std::string resourceNotice;
 };
 struct SceneActor {
     int instance{}, scene{};

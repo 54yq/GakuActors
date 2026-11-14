@@ -135,6 +135,7 @@ static void TickImpl(void* context,float) {
             try{s.native.DiagnoseActors();}catch(const std::exception& e){Log(s,std::string("Diagnostic actors unavailable: ")+e.what(),GAKU_LOG_WARNING);}
             Log(s,"Catalog request BEGIN (explicit user action, admitted scene)");
             try{auto catalog=s.native.ScanCatalog();catalog.revision=next.catalog.revision+1;next.catalog=std::move(catalog);s.catalogRead=true;Log(s,"Game master catalog read: "+std::to_string(next.catalog.characters.size())+" characters, "+std::to_string(next.catalog.bodies.size())+" bodies, "+std::to_string(next.catalog.heads.size())+" heads");
+                s.native.StartResourceScan(next.catalog);
                 s.modelQueue.clear();s.modelCursor=0;s.modelFailures=0;
                 for(const auto& p:next.catalog.defaults)if(p.factory.empty())s.modelQueue.push_back(p);
             }
@@ -144,12 +145,13 @@ static void TickImpl(void* context,float) {
         if(next.admitted&&s.modelCursor<s.modelQueue.size()) {
             // Resolve definitions, not assets, at most one outfit per frame.
             // This work is scheduled only by an explicit admitted-scene scan.
-            try{next.catalog.models.push_back(s.native.ResolveModelAssets(s.modelQueue[s.modelCursor]));}
+            try{auto model=s.native.ResolveModelAssets(s.modelQueue[s.modelCursor]);AddDescriptorResources(next.catalog,model);next.catalog.models.push_back(std::move(model));}
             catch(const std::exception& e){if(s.modelFailures++<3)Log(s,std::string("Model definition resolve skipped: ")+e.what(),GAKU_LOG_WARNING);}
             ++s.modelCursor;
             next.catalog.notice="目录已读取；模型资源解析 "+std::to_string(s.modelCursor)+"/"+std::to_string(s.modelQueue.size())+"；资源定义不代表已加载人物";
             if(s.modelCursor==s.modelQueue.size())Log(s,"Model definitions complete: resolved="+std::to_string(next.catalog.models.size())+" skipped="+std::to_string(s.modelFailures));
         }
+        if(next.admitted)s.native.StepResourceScan(next.catalog);
         if(next.admitted&&s.sceneRequested&&now>=s.nextScan){next.actors=s.native.ScanScene();s.nextScan=now+std::chrono::milliseconds(500);}
     } catch(const std::exception& e){s.native.notice=e.what();Log(s,e.what(),GAKU_LOG_WARNING);}
     s.native.EndFrame();
@@ -215,7 +217,7 @@ static void Shutdown(void* context) noexcept {
 extern "C" GAKU_PLUGIN_EXPORT GakuStatus GakuPlugin_Query(uint32_t version,uint32_t bytes,GakuPluginDescriptor* output) {
     if(version!=GAKU_ABI_VERSION)return GAKU_E_VERSION;
     if(!output)return GAKU_E_INVALID_ARGUMENT;if(bytes<sizeof(*output))return GAKU_E_SIZE;
-    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.2.0-isolated",
+    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.2.1-resources",
         GakuActors::Activate,GakuActors::RuntimeReady,GakuActors::Tick,GakuActors::ActorTick,GakuActors::Desktop,GakuActors::Shutdown};
     return GAKU_OK;
 }

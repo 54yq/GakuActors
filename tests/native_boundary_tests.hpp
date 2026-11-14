@@ -90,6 +90,34 @@ struct NativeApiTestAccess {
         check(!api.EnableCreation(true));check(!api.StartSpawn(valid,123));
         api.Shutdown();check(invoked==0);
     }
+    static inline size_t indexPosition{},indexCalls{},indexFreed{};
+    static inline bool indexMore{};
+    template<class Check> static void ResourceIndexBudget(Check check) {
+        NativeApi api;Catalog catalog;indexPosition=indexCalls=indexFreed=0;
+        check(!api.StartResourceScan(catalog)); // no scene: zero native exports required
+        api.StepResourceScan(catalog);check(!api.ResourceScanActive());
+        api.objectClass_=[](void* o)->void*{return o==Tag(0xd02)?Tag(0xe02):Tag(0xe01);};
+        api.isValue_=[](void*){return false;};
+        api.classNamespace_=[](void*){return "System";};api.className_=[](void* c){return c==Tag(0xe02)?"String":"SyntheticIterator";};
+        api.stringLength_=[](void*){return 9;};api.stringChars_=[](void*)->const wchar_t*{return L"unrelated";};
+        api.unbox_=[](void*)->void*{return &indexMore;};
+        api.methods_=[](void*,void**)->const void*{return nullptr;};api.parent_=[](void*)->void*{return nullptr;};
+        api.handleTarget_=[](void* h)->void*{return h;};api.newHandle_=[](void* o,bool)->void*{return o;};
+        api.freeHandle_=[](void* h){if(h==Tag(0xd01))++indexFreed;};
+        api.invoke_=[](const void* m,void*,void**,void**)->void* {
+            ++indexCalls;
+            if(m==Tag(0xf01)){indexMore=indexPosition++<600;return Tag(0xd03);}
+            return Tag(0xd02);
+        };
+        api.SetAdmittedScene(-50);api.resourceScan_.iterator=Tag(0xd01);api.resourceScan_.moveNext=Tag(0xf01);api.resourceScan_.current=Tag(0xf02);
+        api.StepResourceScan(catalog);check(api.resourceScan_.visited==512&&api.ResourceScanActive());
+        check(indexCalls==1024); // 512 MoveNext + Current, no bundle loader/converter call
+        api.StepResourceScan(catalog);check(!api.ResourceScanActive());check(indexFreed==1);
+        check(catalog.resources.empty()&&catalog.resourceNotice.find("600")!=std::string::npos);
+        api.resourceScan_.iterator=Tag(0xd01);api.resourceScan_.moveNext=Tag(0xf01);api.resourceScan_.current=Tag(0xf02);
+        const size_t previous=indexCalls;api.SetAdmittedScene(0);api.StepResourceScan(catalog);
+        check(indexCalls==previous&&indexFreed==2&&!api.ResourceScanActive());
+    }
     template<class Check> static void Run(Check check) {
         NativeApi api;api.objectClass_=ObjectClass;api.isValue_=IsValue;api.unbox_=Unbox;api.invoke_=Invoke;api.methodName_=MethodName;
         auto method=reinterpret_cast<const void*>(0x10);auto object=reinterpret_cast<void*>(0x30);
@@ -122,6 +150,7 @@ struct NativeApiTestAccess {
         MetadataOnly(check);
         TupleDecoder(check);
         PendingAndRemovalGuards(check);
+        ResourceIndexBudget(check);
     }
 };
 }

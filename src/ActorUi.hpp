@@ -1,5 +1,6 @@
 #pragma once
 #include "Catalog.hpp"
+#include "ResourceCatalog.hpp"
 #include <imgui.h>
 #include <cstdio>
 #include <deque>
@@ -42,6 +43,19 @@ class ActorUi {
             ImGui::EndCombo();
         }
     }
+    void ResourceCombo(const char* label,const std::vector<ModelResource>& values,char* selected,size_t size) {
+        ImGui::SetNextItemWidth(-1);
+        if(ImGui::BeginCombo(label,selected[0]?selected:"选择已发现的模型部件")) {
+            for(const auto& r:values) {
+                const bool active=r.resource==selected;
+                if(ImGui::Selectable((r.resource+"##"+r.kind).c_str(),active))std::snprintf(selected,size,"%s",r.resource.c_str());
+                if(active)ImGui::SetItemDefaultFocus();
+                if(ImGui::IsItemHovered())ImGui::SetTooltip("来源：%s\n资源包：%s\n索引存在不代表已下载或构建成功",r.source.c_str(),r.bundle.c_str());
+            }
+            if(values.empty())ImGui::TextDisabled("暂无条目；请等待底层目录完成，或显示其他人物");
+            ImGui::EndCombo();
+        }
+    }
 public:
     std::deque<Command> commands;
     void Draw(const UiSnapshot& s) {
@@ -59,6 +73,7 @@ public:
         ImGui::SameLine();if(ImGui::Button("重新读取预设"))commands.push_back({Action::Reload});
         ImGui::TextWrapped("读取目录时同时记录只读诊断：原生接口签名和现有角色模型／骨骼状态，可在同一次运行中重复读取。");
         ImGui::TextWrapped("%s",s.catalog.notice.c_str());
+        if(!s.catalog.resourceNotice.empty())ImGui::TextWrapped("%s",s.catalog.resourceNotice.c_str());
         if(!s.notice.empty())ImGui::TextWrapped("%s",s.notice.c_str());
         ImGui::Spacing();ImGui::Separator();
         ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##actor_search","搜索人物名称或代号",search_,sizeof(search_));
@@ -77,11 +92,20 @@ public:
         if(ImGui::BeginChild("人物预设",ImVec2(0,columns?350.0f:330.0f),true)) {
             const auto* c=FindCharacter(s.catalog,character_);
             ImGui::TextUnformatted(c?c->name.c_str():"人物预设");
+            const auto rawBodies=ResourceChoices(s.catalog,character_,"body"),rawFaces=ResourceChoices(s.catalog,character_,"face"),rawHair=ResourceChoices(s.catalog,character_,"hair");
+            ImGui::TextDisabled("已发现模型：身体 %d · 脸 %d · 头发 %d",static_cast<int>(rawBodies.size()),static_cast<int>(rawFaces.size()),static_cast<int>(rawHair.size()));
             ImGui::SameLine();ImGui::BeginDisabled(!c);
             if(ImGui::Button("＋ 新建预设")) {
                 Preset p;p.character=character_;p.name=c?c->name+" · 自定义":"自定义";
-                for(const auto& def:s.catalog.defaults)if(def.character==character_){p=def;p.name=(c?c->name:character_)+" · 自定义";break;}
+                bool formal=false;
+                for(const auto& def:s.catalog.defaults)if(def.character==character_){p=def;p.name=(c?c->name:character_)+" · 自定义";formal=true;break;}
+                if(!formal) {
+                    if(!rawBodies.empty())p.bodyAsset=rawBodies.front().resource;
+                    if(rawFaces.size()==1)p.faceAsset=rawFaces.front().resource;
+                    if(rawHair.size()==1)p.hairAsset=rawHair.front().resource;
+                }
                 BeginEdit(p,true);
+                if(!formal&&(!rawBodies.empty()||!rawFaces.empty()||!rawHair.empty()))advanced_=true;
             }
             ImGui::EndDisabled();
             auto presetRow=[&](const Preset& p) {
@@ -117,17 +141,8 @@ public:
                     if(!advanced_){PartCombo("身体／服装",s.catalog.bodies,body_);PartCombo("头部／发型",s.catalog.heads,head_);}
                     ImGui::Checkbox("直接指定已知模型资源",&advanced_);
                     if(advanced_){
-                        const auto bodies=ModelChoices(s.catalog,character_,false,crossCharacter_);
                         const auto heads=ModelChoices(s.catalog,character_,true,crossCharacter_);
-                        if(ImGui::BeginCombo("已读取的身体模型",bodyAsset_[0]?bodyAsset_:"选择模型资源")) {
-                            for(const auto& m:bodies) {
-                                const bool selected=m.body==bodyAsset_;
-                                if(ImGui::Selectable((m.label+"##body_"+m.body).c_str(),selected))std::snprintf(bodyAsset_,sizeof(bodyAsset_),"%s",m.body.c_str());
-                                if(selected)ImGui::SetItemDefaultFocus();
-                            }
-                            if(bodies.empty())ImGui::TextDisabled("该分类暂无已解析资源；可显示其他人物或使用服装模式");
-                            ImGui::EndCombo();
-                        }
+                        ResourceCombo("已发现的身体模型",ResourceChoices(s.catalog,character_,"body",crossCharacter_),bodyAsset_,sizeof(bodyAsset_));
                         const auto headPreview=faceAsset_[0]?std::string(faceAsset_)+" + "+hairAsset_:"选择脸部与头发组合";
                         if(ImGui::BeginCombo("已读取的头部模型",headPreview.c_str())) {
                             for(const auto& m:heads) {
@@ -140,6 +155,8 @@ public:
                             if(heads.empty())ImGui::TextDisabled("该分类暂无已解析的脸部与头发组合");
                             ImGui::EndCombo();
                         }
+                        ResourceCombo("已发现的脸部模型",ResourceChoices(s.catalog,character_,"face",crossCharacter_),faceAsset_,sizeof(faceAsset_));
+                        ResourceCombo("已发现的头发模型",ResourceChoices(s.catalog,character_,"hair",crossCharacter_),hairAsset_,sizeof(hairAsset_));
                         ImGui::SetNextItemWidth(-1);ImGui::InputText("身体资源",bodyAsset_,sizeof(bodyAsset_));
                         ImGui::SetNextItemWidth(-1);ImGui::InputText("脸部资源",faceAsset_,sizeof(faceAsset_));
                         ImGui::SetNextItemWidth(-1);ImGui::InputText("头发资源",hairAsset_,sizeof(hairAsset_));}

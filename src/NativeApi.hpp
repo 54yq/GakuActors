@@ -2,6 +2,7 @@
 #include "Catalog.hpp"
 #include "ModelReadiness.hpp"
 #include "ActorOwnership.hpp"
+#include "ResourceCatalog.hpp"
 #include <windows.h>
 #include <chrono>
 #include <cstring>
@@ -56,6 +57,12 @@ class NativeApi {
     void* (*fieldType_)(const void*){};
     void* (*fieldValue_)(const void*,void*){};
     bool creationEnabled_{},faulted_{};
+    struct ResourceScan {
+        void* iterator{};const void* moveNext{},*current{},*converter{};
+        std::vector<ResourceNamePattern> patterns;
+        size_t visited{},added{},candidates{};
+        std::vector<std::string> samples;
+    } resourceScan_;
     std::vector<ActorLease> owned_;
     struct Pending {
         bool active{},cancelled{};
@@ -376,7 +383,16 @@ public:
                 if(!head) {
                     const auto defaultHead=Text(row,"get_DefaultCostumeHeadId");
                     auto h=defaultHead.empty()?Text(row,"get_CostumeHeadId"):defaultHead;
+                    // The native relation may resolve aliases/default rules
+                    // that are not direct foreign-key hits in CostumeHead.
+                    for(const char* getter:{"GetDefaultCostumeHead","GetCostumeHead"})if(const auto m=On(row,getter)) {
+                        try{Pin resolved(*this,Call(m,row));const auto id=Text(resolved.Get(),"get_Id");if(!id.empty()){h=id;break;}}catch(const std::exception&){}
+                    }
                     if(!h.empty())out.defaults.push_back({"builtin:"+item.id,item.name,item.character,item.id,h,{},{},{},{},true});
+                } else {
+                    for(const char* getter:{"get_FaceAssetId","get_HairAssetId"})if(auto model=ParseModelResource(Text(row,getter))) {
+                        model->source="头部目录资源字段";AddModelResource(out,std::move(*model));
+                    }
                 }
             }
             Trace(head?"Catalog phase: CostumeHeadMaster END":"Catalog phase: CostumeMaster END");
@@ -449,6 +465,7 @@ public:
         return model;
     }
     #include "NativeSpawn.inl"
+    #include "NativeResourceIndex.inl"
     bool DiagnoseActors() {
         const int scene=PerformanceScene();if(!scene)return false;
         Trace(("Diagnostic actors BEGIN: owner_scene="+std::to_string(scene)+" (read only; no humanoid bone lookup)").c_str());
@@ -508,6 +525,7 @@ public:
         Trace(("Diagnostic actors END: inspected="+std::to_string((std::min)(count,size_t{64}))).c_str());return true;
     }
     void SuspendScene() {
+        StopResourceScan();
         creationEnabled_=false;CancelPending();
         for(auto it=owned_.begin();it!=owned_.end();) {
             if(!it->ready){++it;continue;}
@@ -520,7 +538,7 @@ public:
     void Shutdown() {
         // The host may shut down off the Unity thread. Do not invoke Unity or
         // destroy actors here; the process/owning scene handles destruction.
-        creationEnabled_=false;admittedScene_=0;DropPending(false);owned_.clear();EndFrame();
+        creationEnabled_=false;admittedScene_=0;StopResourceScan(false);DropPending(false);owned_.clear();EndFrame();
     }
 };
 }
