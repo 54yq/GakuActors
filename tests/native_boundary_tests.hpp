@@ -139,6 +139,9 @@ struct NativeApiTestAccess {
         check(!recovery.RemoveActor(123));
         float position[]{1,2,3};check(!recovery.MoveActor(123,position));
         recovery.SuspendScene();check(recovery.PerformanceScene()==0);
+        recovery.pending_.active=true;recovery.pending_.lease.preset="id";
+        recovery.SyncPresetActorNames(valid);check(recovery.pending_.displayName=="test");
+        recovery.pending_.active=false;
         recovery.SetAdmittedScene(7);recovery.Shutdown();check(recovery.PerformanceScene()==0);
         check(!recovery.DiagnoseContracts());check(!recovery.DiagnoseActors());
         check(recovery.EnableCreation(true));check(recovery.MutationsEnabled());

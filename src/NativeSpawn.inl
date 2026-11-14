@@ -70,6 +70,22 @@ void SetPose(void* actor,const float* position,const float* rotation) {
 void SetActorActive(void* actor,bool active) {
     void* go=GameObject(actor);void* args[]{&active};Call(Method(objectClass_(go),"SetActive",1,false,{2}),go,args);
 }
+bool SetPresetActorName(void* actor,const std::string& face,int index,const std::string& presetName) {
+    const auto name=ActorNameForFace(face,index,presetName);if(name.empty())return false;
+    void* go=GameObject(actor);const auto setter=Method(objectClass_(go),"set_name",1,false,{0x0e});
+    if(!setter)return false;
+    Pin value(*this,stringNew_(name.c_str()));void* args[]{value.Get()};Call(setter,go,args);
+    Trace(("Preset actor name: "+name).c_str());return true;
+}
+void SyncPresetActorNames(const Preset& preset) {
+    if(pending_.active&&pending_.lease.preset==preset.id)pending_.displayName=preset.name;
+    if(!PerformanceScene())return;
+    for(const auto& lease:owned_)if(lease.ready&&lease.preset==preset.id&&lease.identity.scene==PerformanceScene())try {
+        void* actor=ResolveLease(lease);if(!actor){Trace("Preset name update skipped: actor ownership changed");continue;}
+        Pin descriptor(*this,Call(On(actor,"get_descriptor"),actor));
+        if(!SetPresetActorName(actor,Text(descriptor.Get(),"get_face"),lease.identity.index,preset.name))Trace("Preset name update skipped: actor name setter unavailable");
+    }catch(const std::exception& e){Trace((std::string("Preset name update failed: ")+e.what()).c_str());}
+}
 void Fault(const std::string& reason) {
     faulted_=true;creationEnabled_=false;notice="人物操作已锁定："+reason;
     Trace(("Spawn fault LATCHED: "+reason).c_str());
@@ -142,7 +158,7 @@ bool StartSpawn(const Preset& p,int reference) {
         Pin existing(*this,Call(On(a,"get_descriptor"),a));
         if(existing.Get()&&existing.Get()==descriptor.Get()){Fault("描述工厂返回既有角色共享对象，拒绝修改身份");return false;}
     }
-    Pending next;next.active=true;next.started=std::chrono::steady_clock::now();next.resultClass=tupleClass;
+    Pending next;next.active=true;next.started=std::chrono::steady_clock::now();next.resultClass=tupleClass;next.displayName=p.name;
     next.lease.manager=Int(manager,"GetInstanceID");next.lease.identity.scene=scene;next.lease.preset=p.id;
     static uint64_t serial{};next.lease.identity.unique="gakuactors-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(++serial);
     Pin id(*this,stringNew_(next.lease.identity.unique.c_str()));void* idArgs[]{id.Get()};Call(setId,descriptor.Get(),idArgs);
@@ -244,12 +260,8 @@ void PollSpawn() {
         // The motion plugin identifies active actors from the face model or
         // the GameObject name. Use the actual built face, not preset category.
         try {
-            void* go=GameObject(actor.Get());const auto name=ActorNameForFace(pending_.requested.face,current.index);
-            if(!name.empty()) {
-                const auto setName=Method(objectClass_(go),"set_name",1,false,{0x0e});
-                if(setName){Pin value(*this,stringNew_(name.c_str()));void* nameArgs[]{value.Get()};Call(setName,go,nameArgs);Trace(("Spawn actor name: "+name).c_str());}
-                else Trace("Spawn actor name unavailable: Unity name setter missing");
-            } else Trace("Spawn actor name unavailable: face identity was not recognized");
+            if(!SetPresetActorName(actor.Get(),pending_.requested.face,current.index,pending_.displayName))
+                Trace("Spawn actor name unavailable: face identity or Unity name setter unavailable");
         }catch(const std::exception& e){Trace((std::string("Spawn actor name unavailable: ")+e.what()).c_str());}
         SetPose(actor.Get(),pending_.position,pending_.rotation);SetActorActive(actor.Get(),true);
         if(!BaselinePreserved(pending_.baseline,CaptureActors()))throw std::runtime_error("激活独立人物后既有角色状态发生变化");

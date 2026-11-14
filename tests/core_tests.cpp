@@ -94,11 +94,13 @@ int main() {
     check(ResourceChoices(npc,"krnh","body").size()==1);check(ResourceChoices(npc,"krnh","face").size()==1);
     check(ResourceChoices(npc,"hkne","hair").size()==1);check(ResourceChoices(npc,"hkne","hair",true).size()==2);
     check(!ParseModelResource("mdl_chr_krnh-base-0000_face_diffuse"));check(!ParseModelResource("../mdl_chr_krnh-base-0000_face"));
-    check(ActorNameForFace("mdl_chr_krnh-base-0000_face",2)=="krnh | GakuActors[2]");
-    check(ActorNameForFace("mdl_chr_hume-base-0000_face",3)=="hume | GakuActors[3]");
-    check(ActorNameForFace("mdl_chr_hume-base-0000_hair",0).empty());
-    check(ActorNameForFace("mdl_chr_unknown-base-0000_face",0).empty());
-    check(ActorNameForFace("mdl_chr_myu0-base-0000_face",0)=="myu0 | GakuActors[0]");
+    check(ActorNameForFace("mdl_chr_krnh-base-0000_face",2,"我的燐羽")=="krnh | GakuActors[2] | preset:我的燐羽");
+    check(ActorNameForFace("mdl_chr_hume-base-0000_face",3,"自定义")=="hume | GakuActors[3] | preset:自定义");
+    check(ActorNameForFace("mdl_chr_hume-base-0000_hair",0,"名字")=="gakuactors | GakuActors[0] | preset:名字");
+    check(ActorNameForFace("mdl_chr_unknown-base-0000_face",0,"名字")=="unknown | GakuActors[0] | preset:名字");
+    check(ActorNameForFace("mdl_chr_myu0-base-0000_face",0,"优")=="myu0 | GakuActors[0] | preset:优");
+    check(ActorNameForFace("other-face",0,"自定义")=="gakuactors | GakuActors[0] | preset:自定义");
+    check(ActorNameForFace("other-face",0,"").empty());
     check(!ParseModelResource("mdl_chr_krnh-base-0000_face.prefab"));check(!ParseModelResource("mdl_prp_krnh_body"));
     auto part=*ParseModelResource("mdl_chr_krnh-base-0000_face");part.bundle="registered/face";part.source="Octo";
     check(!AddModelResource(npc,part));check(ResourceChoices(npc,"krnh","face")[0].bundle=="registered/face");

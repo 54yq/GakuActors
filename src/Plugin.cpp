@@ -108,7 +108,7 @@ static void TickImpl(void* context,float) {
             switch(command.action) {
             case Action::Scan:if(next.admitted){s.catalogRequested=true;s.sceneRequested=true;}break;
             case Action::Reload:s.store.Load();break;
-            case Action::Save:s.store.Save(command.preset);break;
+            case Action::Save:if(s.store.Save(command.preset)&&next.admitted)s.native.SyncPresetActorNames(command.preset);break;
             case Action::DeletePreset:s.store.Remove(command.preset.id);break;
             case Action::Spawn:
                 Log(s,"Spawn command: preset="+command.preset.id+" category="+command.preset.character+" body="+command.preset.bodyAsset+" face="+command.preset.faceAsset+" hair="+command.preset.hairAsset);
@@ -217,7 +217,7 @@ static void Shutdown(void* context) noexcept {
 extern "C" GAKU_PLUGIN_EXPORT GakuStatus GakuPlugin_Query(uint32_t version,uint32_t bytes,GakuPluginDescriptor* output) {
     if(version!=GAKU_ABI_VERSION)return GAKU_E_VERSION;
     if(!output)return GAKU_E_INVALID_ARGUMENT;if(bytes<sizeof(*output))return GAKU_E_SIZE;
-    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.2.2-names",
+    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.2.3-preset-names",
         GakuActors::Activate,GakuActors::RuntimeReady,GakuActors::Tick,GakuActors::ActorTick,GakuActors::Desktop,GakuActors::Shutdown};
     return GAKU_OK;
 }

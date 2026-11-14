@@ -68,6 +68,7 @@ class NativeApi {
         bool active{},cancelled{};
         void* task{},*awaiter{},*cancellation{},*resultClass{};
         ActorLease lease;ModelAssets requested;
+        std::string displayName;
         std::vector<ActorIdentity> baseline;
         float position[3]{},rotation[4]{0,0,0,1};
         std::chrono::steady_clock::time_point started;
