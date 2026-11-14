@@ -12,6 +12,12 @@ inline std::optional<ModelResource> ParseModelResource(const std::string& name) 
     if(kind!="body"&&kind!="face"&&kind!="hair")return {};
     return ModelResource{name.substr(8,dash-8),kind,name,{},{}};
 }
+inline std::string ActorNameForFace(const std::string& face,int index) {
+    const auto model=ParseModelResource(face);
+    if(!model||model->kind!="face"||model->character.size()!=4)return {};
+    for(char c:model->character)if(!((c>='a'&&c<='z')||(c>='0'&&c<='9')))return {};
+    return model->character+" | GakuActors["+std::to_string(index)+"]";
+}
 inline bool AddModelResource(Catalog& c,ModelResource resource) {
     if(!ParseModelResource(resource.resource))return false;
     auto it=std::find_if(c.resources.begin(),c.resources.end(),[&](const auto& a){return a.resource==resource.resource;});

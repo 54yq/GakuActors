@@ -241,6 +241,16 @@ void PollSpawn() {
         bool active=true;void* args[]{&active};Call(Method(objectClass_(actor.Get()),"SetRendererActive",1,false,{2}),actor.Get(),args);
         const auto evidence=InspectBuiltModel(actor.Get(),pending_.requested);std::string error;
         if(!ValidateModelReadiness(evidence,error))throw std::runtime_error(error);
+        // The motion plugin identifies active actors from the face model or
+        // the GameObject name. Use the actual built face, not preset category.
+        try {
+            void* go=GameObject(actor.Get());const auto name=ActorNameForFace(pending_.requested.face,current.index);
+            if(!name.empty()) {
+                const auto setName=Method(objectClass_(go),"set_name",1,false,{0x0e});
+                if(setName){Pin value(*this,stringNew_(name.c_str()));void* nameArgs[]{value.Get()};Call(setName,go,nameArgs);Trace(("Spawn actor name: "+name).c_str());}
+                else Trace("Spawn actor name unavailable: Unity name setter missing");
+            } else Trace("Spawn actor name unavailable: face identity was not recognized");
+        }catch(const std::exception& e){Trace((std::string("Spawn actor name unavailable: ")+e.what()).c_str());}
         SetPose(actor.Get(),pending_.position,pending_.rotation);SetActorActive(actor.Get(),true);
         if(!BaselinePreserved(pending_.baseline,CaptureActors()))throw std::runtime_error("激活独立人物后既有角色状态发生变化");
         for(auto& o:owned_)if(o.identity.instance==current.instance)o.ready=true;
