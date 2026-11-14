@@ -16,6 +16,18 @@
 
 旧 DLL 和日志尾部保存在 ignored `build/live-test-20261115/incident-013/`，旧二进制 SHA256 为 `7E435B04F18E70DAF5A40946DCC4E0A7A90A6DB3A3604D0983ACCB8A6E661D25`。
 
+## 同一运行期间的重新载入调查
+
+用户暂不退出游戏，重新载入后继续查现有日志，无插件替换、进程控制或内存写入。
+
+- 拍摄准入和角色回调再次出现，目录再次读出相同的 25／580／427 条记录。周期回调仅能证明有控制器参与更新，不能证明完整人物名单或可见模型恢复。
+- 新的两次请求改用 `hmsz-cstm-0000` 和 `costume_head_hmsz-schl-0000`，仍在任务返回值索引解析处报同一个错误。故障并非仅在先前的 hume 搭配上出现。
+- `Player.log` 发现 `InitializeBonesを呼び出して下さい`（请调用 InitializeBones），堆栈落在 `VL.VLDefaultActorController` 的 `GetHumanBodyBoneTransform(HumanBodyBones)`。这表明一次骨骼查询未满足初始化条件，但日志没有角色 ID／请求关联时间，不能确定是新增角色，也不能证明所有人物骨骼都没有加载。
+- `TextureResourceView` 的空资源名错误堆栈经过 `PictureBookLivePlayConfirmCharacterView.Set`，属于服装确认界面的图片资源路径；不能当作身体／头部模型缺失的证据。
+- PC metadata 确认公共和管理器两个缓存更新入口使用相同返回类型索引；仅凭该索引无法解出完整托管类型。旧日志没输出任务结果类型，不猜测其为整数、元组或 ActorInfo，也不为取得这个信息重复执行危险的缓存更新。
+
+本次快照和结构化证据保存在 ignored `build/live-test-20261115/incident-013/reload-loader-tail.txt`、`reload-player.log`、`reload-evidence.json`。场景重新载入不会替换已载入进程的 DLL；读取日志可持续进行，缺失的返回类型和实例归属字段需要后续诊断版本补齐，不能靠重复点击或反复重启补出。
+
 ## 保护版的变更
 
 - 移除全局缓存创建、任务结果解析、销毁回滚、取消及场景对象清理路径。
