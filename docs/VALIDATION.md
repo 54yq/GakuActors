@@ -88,4 +88,4 @@
 
 0.2 的 268 项核心检查、120 帧实际启动泵回归和独立 DLL ABI 检查通过，最终运行库重建无编译器警告。还增加了描述共享对象的拒绝：在修改 uniqueId 前确认工厂未返回既有角色的描述对象，并在索引分配、创建控制器、完成构建及激活后分别检查既有基线。任务异常会记录托管异常类型与消息。
 
-修复版产物 SHA256 为 `0877E5D400F06E4B9502241C5F0EC43F37BA51738CD963B9FA7E49F1D0A82490`，保存在 `build/GakuActors.dll` 及 ignored `build/live-test-20261115/isolated-020/GakuActors-0.2.0-isolated.dll`。安装检查确认游戏仍在运行，未替换游戏文件，当前仍为 0.1.4 诊断版。延迟记录与待执行安装脚本位于同目录。0.2 新增人物尚未实测，不能报告模型导入、原生物理或动作联动已经修复通过。
+修复版产物 SHA256 为 `0877E5D400F06E4B9502241C5F0EC43F37BA51738CD963B9FA7E49F1D0A82490`，保存在 `build/GakuActors.dll` 及 ignored `build/live-test-20261115/isolated-020/GakuActors-0.2.0-isolated.dll`。首次安装因游戏运行而延迟；用户随后退出游戏并明确要求安装，进程检查通过后已替换游戏目录中的 GakuActors.dll，安装哈希与产物一致。0.1.4 已备份为同目录 `GakuActors-before-isolated.dll`，其他四个插件和用户预设哈希均未变化，记录见 `installation.json`。游戏未由代理启动。0.2 新增人物尚未实测，不能报告模型导入、原生物理或动作联动已经修复通过。
