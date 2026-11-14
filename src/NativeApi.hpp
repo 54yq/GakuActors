@@ -46,8 +46,12 @@ class NativeApi {
     void (*freeHandle_)(void*){};
     int (*valueSize_)(void*,uint32_t*){};
     std::vector<void*> frameRoots_;
+    int admittedScene_{};
+    const void* activeSceneMethod_{};
     template<class T> bool Export(T& fn,const char* name){fn=reinterpret_cast<T>(GetProcAddress(module_,name));return fn!=nullptr;}
 public:
+    void (*trace)(const char*){};
+    void Trace(const char* message){if(trace)trace(message);}
     struct Pin {
         NativeApi* api{};void* handle{};
         Pin(NativeApi& a,void* object):api(&a),handle(object?a.newHandle_(object,false):nullptr){}
@@ -121,7 +125,7 @@ public:
         void* exception=nullptr;
         if(target&&isValue_(objectClass_(target)))target=unbox_(target);
         void* value=invoke_(method,target,args,&exception);
-        if(exception)throw std::runtime_error("游戏方法返回异常，操作已停止");
+        if(exception)throw std::runtime_error(std::string("游戏方法返回异常：")+methodName_(method));
         return value;
     }
     std::string String(void* value) {
@@ -177,14 +181,20 @@ public:
         uint32_t align{};if(valueSize_(objectClass_(boxed),&align)!=4)throw std::runtime_error("Scene 布局不匹配");
         return *static_cast<int*>(unbox_(boxed));
     }
-    int PhotographyScene() {
-        int scene=0;size_t count=0;
-        for(void* p:Objects(Class("Campus.Photography","PhotographyScenePresenter"))) {
-            void* go=GameObject(p);if(!Bool(go,"get_activeInHierarchy"))continue;
-            scene=SceneOf(go);++count;
-        }
-        return count==1?scene:0;
+    std::string ActiveSceneName() {
+        if(!activeSceneMethod_)activeSceneMethod_=Method(Class("UnityEngine.SceneManagement","SceneManager"),"GetActiveScene",0,true);
+        Pin scene(*this,Call(activeSceneMethod_));
+        return scene.Get()?Text(scene.Get(),"get_name"):std::string{};
     }
+    struct ActorScene {std::string owner,active;int handle{};};
+    ActorScene ObserveActorScene(void* actor) {
+        if(!actor)return {};
+        void* go=GameObject(actor);
+        Pin scene(*this,Call(On(go,"get_scene"),go));
+        ActorScene out;out.handle=SceneOf(go);out.owner=Text(scene.Get(),"get_name");out.active=ActiveSceneName();return out;
+    }
+    void SetAdmittedScene(int scene){admittedScene_=scene;}
+    int PerformanceScene()const{return admittedScene_;}
     void Pose(void* actor,float* position,float* rotation) {
         void* transform=Call(On(actor,"get_transform"),actor);
         void* p=Call(On(transform,"get_position"),transform);
@@ -204,7 +214,8 @@ public:
         Call(p,transform,pa);Call(r,transform,ra);
     }
     std::vector<SceneActor> ScanScene() {
-        std::vector<SceneActor> result;const int scene=PhotographyScene();
+        std::vector<SceneActor> result;const int scene=PerformanceScene();
+        if(!scene)return result;
         std::vector<int> allInstances;
         for(void* actor:Objects(Class("Campus.Common","CampusActorController"))) {
             allInstances.push_back(Int(actor,"GetInstanceID"));
@@ -259,14 +270,19 @@ public:
     Catalog ScanCatalog() {
         Catalog out;void* master=Class("Campus.Common.Master","MasterManager");
         auto load=[&](const char* getter){return Call(Method(master,getter,0,true));};
+        Trace("Catalog phase: CharacterMaster getter BEGIN");
         Pin chars(*this,load("get_CharacterMaster"));int ascending=0;void* sort[]{&ascending};
+        Trace("Catalog phase: CharacterMaster getter END; sorted list BEGIN");
         Pin characters(*this,Call(Sorted(chars.Get()),chars.Get(),sort));
+        Trace("Catalog phase: CharacterMaster sorted list END; enumerate BEGIN");
         for(void* c:Items(characters.Get())) {
             const auto id=Text(c,"get_Id");if(!TextValid(id,128))continue;
             auto name=Text(c,"get_Name");if(name.empty())name=id;
             out.characters.push_back({id,name,false});
         }
+        Trace("Catalog phase: CharacterMaster enumerate END");
         for(bool head:{false,true}) {
+            Trace(head?"Catalog phase: CostumeHeadMaster BEGIN":"Catalog phase: CostumeMaster BEGIN");
             Pin manager(*this,load(head?"get_CostumeHeadMaster":"get_CostumeMaster"));
             if(!manager.Get())throw std::runtime_error("游戏服装目录尚未就绪");
             Pin rows(*this,Call(Sorted(manager.Get()),manager.Get(),sort));
@@ -281,7 +297,9 @@ public:
                     if(!h.empty())out.defaults.push_back({"builtin:"+item.id,item.name,item.character,item.id,h,{},{},{},{},true});
                 }
             }
+            Trace(head?"Catalog phase: CostumeHeadMaster END":"Catalog phase: CostumeMaster END");
         }
+        Trace("Catalog phase: optional special descriptors BEGIN");
         struct Special {const char* factory;const char* label;};
         for(const auto& entry:std::vector<Special>{{"CreateTeacherDescriptor","老师"},{"CreateTeacherGlassHairDescriptor","老师（眼镜／发型）"},
             {"CreateVocalTrainerDescriptor","歌唱训练员"},{"CreateDanceTrainerDescriptor","舞蹈训练员"},{"CreateVisualTrainerDescriptor","视觉训练员"}}) {
@@ -312,6 +330,7 @@ public:
             } catch(const std::exception&) {/* Missing optional factory never rejects normal outfits. */}
         }
         out.defaults.erase(std::remove_if(out.defaults.begin(),out.defaults.end(),[&](const auto& p){return p.factory.empty()&&!FindPart(out.heads,p.head);}),out.defaults.end());
+        Trace("Catalog phase: optional special descriptors END");
         out.notice="已读取游戏人物、服装与头部目录；资源加载状态尚待验证";return out;
     }
     void* Manager(int instance=0) {
@@ -354,7 +373,7 @@ public:
     bool StartSpawn(const Preset& p,int reference) {
         std::string error;if(!ValidatePreset(p,error)){notice=error;return false;}
         if(pending.task){notice="正在加载人物，请稍候";return false;}
-        const int scene=PhotographyScene();if(!scene){notice="请先进入摄影场景";return false;}
+        const int scene=PerformanceScene();if(!scene){notice="请先进入拍摄或 Live 场景";return false;}
         if(owned.size()>=8){notice="实验版最多管理 8 个新增人物";return false;}
         void* primary=FindActor(reference,scene);if(!primary){notice="主角色已变化，请重新选择";return false;}
         void* manager=Manager();if(!manager){notice="无法唯一确认原生人物管理器";return false;}
@@ -410,7 +429,7 @@ public:
     }
     void PollSpawn() {
         if(!pending.task)return;
-        if(PhotographyScene()!=pending.scene) {
+        if(PerformanceScene()!=pending.scene) {
             if(!pending.cancelled) {
                 void* source=handleTarget_(pending.cancellation);
                 Call(On(source,"Cancel"),source);pending.cancelled=true;
@@ -453,6 +472,15 @@ public:
         if(it==owned.end()){notice="只允许移除本插件创建的人物";return false;}
         if(!Destroy(*it)){notice="无法确认人物释放接口，未移除记录";return false;}
         it->removing=true;notice="已请求移除人物，等待场景确认";return true;
+    }
+    void SuspendScene() {
+        admittedScene_=0;
+        if(pending.task&&!pending.cancelled) {
+            void* source=handleTarget_(pending.cancellation);
+            if(source){Call(On(source,"Cancel"),source);pending.cancelled=true;}
+        }
+        for(auto& o:owned)if(!o.removing)o.removing=Destroy(o);
+        notice="当前页面休眠；进入拍摄或 Live 后可按需读取目录";
     }
     void Shutdown() {
         if(!Ready())return;

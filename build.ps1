@@ -36,6 +36,12 @@ try {
         if($LASTEXITCODE -ne 0){throw 'Core tests did not compile.'}
         & (Join-Path $OutputRoot 'core_tests.exe')
         if($LASTEXITCODE -ne 0){throw 'Core tests failed.'}
+        $uiSources=@('vendor/imgui/imgui.cpp','vendor/imgui/imgui_draw.cpp','vendor/imgui/imgui_widgets.cpp','vendor/imgui/imgui_tables.cpp') | ForEach-Object {Join-Path $repo $_}
+        New-Item -ItemType Directory -Path (Join-Path $OutputRoot 'startup-obj') -Force | Out-Null
+        & $compiler @common (Join-Path $repo 'tests/startup_policy_tests.cpp') @uiSources "/Fo$OutputRoot/startup-obj/" "/Fe$OutputRoot/startup_policy_tests.exe" user32.lib
+        if($LASTEXITCODE -ne 0){throw 'Startup policy tests did not compile.'}
+        & (Join-Path $OutputRoot 'startup_policy_tests.exe')
+        if($LASTEXITCODE -ne 0){throw 'Startup policy tests failed.'}
     }
     if($Target -in @('All','Runtime')){
         $sources=@('src/Plugin.cpp','vendor/imgui/imgui.cpp','vendor/imgui/imgui_draw.cpp','vendor/imgui/imgui_widgets.cpp','vendor/imgui/imgui_tables.cpp') | ForEach-Object {Join-Path $repo $_}

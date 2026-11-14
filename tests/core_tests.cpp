@@ -4,6 +4,7 @@
 #include <cassert>
 #include <iostream>
 #include "native_boundary_tests.hpp"
+#include "SceneGate.hpp"
 
 int main() {
     using namespace GakuActors;
@@ -37,6 +38,18 @@ int main() {
     auto parsed=Preset{};check(ReadPreset(PresetJson(raw),parsed,error));check(parsed.faceAsset=="face");
     check(!ReadPreset(Json{{"id",5}},parsed,error));
     NativeApiTestAccess::Run(check);
+    SceneGate gate;
+    check(!gate.Fresh(0));
+    gate.Observe("OutGame",1,"OutGame",100);check(!gate.Fresh(100));
+    gate.Observe("Photography",7,"Photography",200);check(gate.Fresh(200));check(gate.Scene()==7);
+    check(gate.Mode()==PerformanceMode::Photography);check(gate.MatchesActive("env_3d_adv_rooftop-00-00-noon"));
+    check(!gate.MatchesActive("OutGame"));check(!gate.Fresh(1701));
+    gate.Observe("Photography",7,"OutGame",300);check(!gate.Fresh(300));
+    gate.Observe("Live",8,"env_3d_live_test",400);check(gate.Fresh(400));check(gate.Mode()==PerformanceMode::Live);
+    gate.Observe("OutGame",1,"OutGame",500);check(!gate.Fresh(500));
+    gate.Observe("Photography",0,"Photography",600);check(!gate.Fresh(600));
+    gate.Observe("Live",9,"Photography",700);check(!gate.Fresh(700));
+    gate.Observe("Photography",7,"env_3d_dress_dressroom-00-00-noon",800);check(!gate.Fresh(800));
     // This test owns exactly these files; no recursive deletion or user paths.
     std::filesystem::remove(file);std::filesystem::remove(root);
     std::cout<<checks<<" preset validation, Unicode persistence, corruption and catalogue checks passed\n";

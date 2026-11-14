@@ -6,6 +6,7 @@
 #include "PresetStore.hpp"
 #include "NativeApi.hpp"
 #include "ActorUi.hpp"
+#include "SceneGate.hpp"
 #include <atomic>
 #include <mutex>
 #include <cmath>
@@ -16,8 +17,9 @@ struct State {
     GakuDesktopUiService desktop{};GakuDesktopWindowService window{};GakuHotkeyService hotkeys{};
     GakuPathsV1 paths{};NativeApi native;PresetStore store;ActorUi ui;UiSnapshot snapshot;
     std::mutex mutex;std::deque<Command> commands;
-    std::atomic<bool> ready{},stopped{};bool catalogRead{};
-    bool dialogOpen{true};
+    std::atomic<bool> ready{},stopped{};bool catalogRead{},catalogRequested{},sceneRequested{},wasAdmitted{};
+    SceneGate gate;
+    bool dialogOpen{false};
     std::chrono::steady_clock::time_point nextScan{},nextCatalog{};
     struct Playback {uint32_t abiVersion,structSize;uint32_t(*isPlaying)();} playback{};
 };
@@ -49,6 +51,7 @@ static GakuStatus ActivateImpl(const GakuHostApi* host,void** output) {
     if(!Query(s,GAKU_SERVICE_LOG,s.log)||!Query(s,GAKU_SERVICE_RUNTIME,s.runtime)||!s.runtime.getGameAssembly)return GAKU_E_UNAVAILABLE;
     Query(s,GAKU_SERVICE_DESKTOP_UI,s.desktop);Query(s,GAKU_SERVICE_DESKTOP_WINDOW,s.window);
     Query(s,GAKU_SERVICE_HOTKEYS,s.hotkeys);Query(s,GAKU_SERVICE_PATHS,s.paths);
+    s.native.trace=[](const char* text){Log(state,text);};
     const auto root=ConfigRoot(s);if(!root.empty())s.store.SetFile(root/L"actor_presets.json");
     s.store.Load();s.snapshot.writable=s.store.Writable();s.snapshot.presets=s.store.presets;s.snapshot.storeNotice=s.store.notice;
     if(s.hotkeys.registerHotkey) {
@@ -60,7 +63,15 @@ static GakuStatus ActivateImpl(const GakuHostApi* host,void** output) {
 static void RuntimeReadyImpl(void* context) {
     auto& s=*static_cast<State*>(context);if(s.stopped)return;
     const bool ready=s.native.Resolve(s.runtime.getGameAssembly());s.ready.store(ready,std::memory_order_release);
-    Log(s,ready?"IL2CPP exports resolved; managed work deferred to Unity thread":"IL2CPP exports unavailable",ready?GAKU_LOG_INFO:GAKU_LOG_WARNING);
+    Log(s,ready?"IL2CPP exports resolved; dormant until a Photography/Live actor is observed; catalog requires explicit request":"IL2CPP exports unavailable",ready?GAKU_LOG_INFO:GAKU_LOG_WARNING);
+}
+static uint64_t MonotonicMs(){return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
+static void ActorTickImpl(void* context,void* actor,float) {
+    auto& s=*static_cast<State*>(context);if(s.stopped||!s.ready.load(std::memory_order_acquire)||!actor)return;
+    // Read only this actual callback actor's Unity owner/active scene. Never
+    // enumerate models, request Master data or create game objects here.
+    const auto scene=s.native.ObserveActorScene(actor);
+    s.gate.Observe(scene.owner,scene.handle,scene.active,MonotonicMs());
 }
 static void TickImpl(void* context,float) {
     auto& s=*static_cast<State*>(context);if(s.stopped||!s.ready.load(std::memory_order_acquire))return;
@@ -70,24 +81,48 @@ static void TickImpl(void* context,float) {
     {std::lock_guard<std::mutex> lock(s.mutex);next=s.snapshot;}
     next.runtime=true;
     const auto now=std::chrono::steady_clock::now();
+    auto publish=[&]{
+        next.busy=s.native.pending.task!=nullptr;next.notice=s.native.notice;
+        next.presets=s.store.presets;next.storeNotice=s.store.notice;next.writable=s.store.Writable();
+        std::lock_guard<std::mutex> lock(s.mutex);s.snapshot=std::move(next);
+    };
     try {
-        if(!s.playback.isPlaying)Query(s,"gakumotion.playback-state",s.playback);
-        next.playing=s.playback.isPlaying&&s.playback.isPlaying();
+        // Idle startup takes no Unity/Master/scene-enumeration path. Only an
+        // existing actor callback can open the performance-scene gate.
+        next.admitted=s.gate.Fresh(MonotonicMs());
+        if(next.admitted&&!s.gate.MatchesActive(s.native.ActiveSceneName())){s.gate.Reset();next.admitted=false;}
+        s.native.SetAdmittedScene(next.admitted?s.gate.Scene():0);
+        next.admissionNotice=next.admitted?(s.gate.Mode()==PerformanceMode::Live?"Live 场景已确认":"拍摄场景已确认"):"当前页面休眠；仅在拍摄或 Live 场景启用";
+        if(!next.admitted) {
+            s.catalogRequested=false;s.sceneRequested=false;next.actors.clear();next.playing=false;
+            if(s.wasAdmitted){s.native.SuspendScene();Log(s,"Performance scene left; catalog/roster scanning suspended");}
+            s.wasAdmitted=false;
+            // Completion of our own cancelled task is cleanup, not a scan or a
+            // load in an unsupported page. Never discard an in-flight awaiter.
+            if(s.native.pending.task)s.native.PollSpawn();
+        } else {
+            if(!s.wasAdmitted){Log(s,"Performance scene admitted; waiting for explicit Read Catalog request");s.native.notice="场景已就绪，点击读取游戏目录后使用人物管理";}
+            s.wasAdmitted=true;
+            if(!s.playback.isPlaying)Query(s,"gakumotion.playback-state",s.playback);
+            next.playing=s.playback.isPlaying&&s.playback.isPlaying();
+        }
         for(const auto& command:commands) {
             switch(command.action) {
-            case Action::Scan:s.catalogRead=false;s.nextCatalog={};break;
+            case Action::Scan:if(next.admitted){s.catalogRequested=true;s.sceneRequested=true;}break;
             case Action::Reload:s.store.Load();break;
             case Action::Save:s.store.Save(command.preset);break;
             case Action::DeletePreset:s.store.Remove(command.preset.id);break;
             case Action::Spawn:
+                if(!next.admitted){s.native.notice="当前页面不支持加入人物";break;}
                 if(next.playing){s.native.notice="请先在动作插件中停止播放";break;}
                 s.native.StartSpawn(command.preset,command.instance);s.nextScan={};break;
             case Action::Remove:
+                if(!next.admitted)break;
                 if(next.playing){s.native.notice="请先在动作插件中停止播放";break;}
                 s.native.RemoveActor(command.instance);s.nextScan={};break;
             case Action::Move: {
                 const auto own=std::find_if(s.native.owned.begin(),s.native.owned.end(),[&](const auto& o){return o.instance==command.instance;});
-                if(own==s.native.owned.end()||own->scene!=s.native.PhotographyScene())break;
+                if(!next.admitted||own==s.native.owned.end()||own->scene!=s.native.PerformanceScene())break;
                 bool finite=true;for(float v:command.position)finite&=std::isfinite(v)&&std::fabs(v)<10000;
                 if(!finite)break;
                 if(void* actor=s.native.FindActor(own->instance,own->scene)){float pos[3],rotation[4];s.native.Pose(actor,pos,rotation);s.native.SetPose(actor,command.position,rotation);}
@@ -95,17 +130,18 @@ static void TickImpl(void* context,float) {
             }
             }
         }
-        if(!s.catalogRead&&now>=s.nextCatalog) {
+        if(next.admitted&&s.catalogRequested) {
+            s.catalogRequested=false;
+            Log(s,"Catalog request BEGIN (explicit user action, admitted scene)");
             try{auto catalog=s.native.ScanCatalog();catalog.revision=next.catalog.revision+1;next.catalog=std::move(catalog);s.catalogRead=true;Log(s,"Game master catalog read: "+std::to_string(next.catalog.characters.size())+" characters, "+std::to_string(next.catalog.bodies.size())+" bodies, "+std::to_string(next.catalog.heads.size())+" heads");}
-            catch(const std::exception& e){next.catalog.notice=std::string("等待游戏目录就绪：")+e.what();s.nextCatalog=now+std::chrono::seconds(5);}
+            catch(const std::exception& e){next.catalog.notice=std::string("目录读取未完成：")+e.what();Log(s,next.catalog.notice,GAKU_LOG_WARNING);}
+            Log(s,"Catalog request END; no automatic retries");
         }
-        s.native.PollSpawn();
-        if(now>=s.nextScan){next.actors=s.native.ScanScene();s.nextScan=now+std::chrono::milliseconds(500);}
+        if(next.admitted)s.native.PollSpawn();
+        if(next.admitted&&s.sceneRequested&&now>=s.nextScan){next.actors=s.native.ScanScene();s.nextScan=now+std::chrono::milliseconds(500);}
     } catch(const std::exception& e){s.native.notice=e.what();Log(s,e.what(),GAKU_LOG_WARNING);}
     s.native.EndFrame();
-    next.busy=s.native.pending.task!=nullptr;next.notice=s.native.notice;
-    next.presets=s.store.presets;next.storeNotice=s.store.notice;next.writable=s.store.Writable();
-    {std::lock_guard<std::mutex> lock(s.mutex);s.snapshot=std::move(next);}
+    publish();
 }
 static void DesktopImpl(void* context) {
     auto& s=*static_cast<State*>(context);if(s.stopped||!s.desktop.bind)return;
@@ -119,9 +155,12 @@ static void DesktopImpl(void* context) {
     // A separate floating dialog in the loader desktop, with no Photography UI
     // templates, event injection or changes to the existing motion plugin.
     ImGui::TextUnformatted("GakuActors · 场景人物管理");
+    ImGui::TextWrapped("%s",snapshot.admissionNotice.c_str());
+    ImGui::BeginDisabled(!snapshot.admitted);
     if(ImGui::Button("打开人物预设弹窗"))s.dialogOpen=true;
+    ImGui::EndDisabled();
     ImGui::TextWrapped("人物目录、头身预设、加入和移除场景人物。");
-    if(s.dialogOpen) {
+    if(s.dialogOpen&&snapshot.admitted) {
         const auto display=ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowSize(ImVec2((std::min)(960.0f,(std::max)(280.0f,display.x-32)),
             (std::min)(820.0f,(std::max)(240.0f,display.y-32))),ImGuiCond_FirstUseEver);
@@ -151,6 +190,9 @@ static void RuntimeReady(void* context) noexcept {
 static void Tick(void* context,float delta) noexcept {
     try{TickImpl(context,delta);}catch(...){state.native.EndFrame();BoundaryError("[GakuActors] Unity callback failed");}
 }
+static void ActorTick(void* context,void* actor,float delta) noexcept {
+    try{ActorTickImpl(context,actor,delta);}catch(...){state.gate.Reset();}
+}
 static void Desktop(void* context) noexcept {
     try{DesktopImpl(context);}catch(...){BoundaryError("[GakuActors] Desktop callback failed");}
 }
@@ -161,7 +203,7 @@ static void Shutdown(void* context) noexcept {
 extern "C" GAKU_PLUGIN_EXPORT GakuStatus GakuPlugin_Query(uint32_t version,uint32_t bytes,GakuPluginDescriptor* output) {
     if(version!=GAKU_ABI_VERSION)return GAKU_E_VERSION;
     if(!output)return GAKU_E_INVALID_ARGUMENT;if(bytes<sizeof(*output))return GAKU_E_SIZE;
-    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.1.0-dev",
-        GakuActors::Activate,GakuActors::RuntimeReady,GakuActors::Tick,nullptr,GakuActors::Desktop,GakuActors::Shutdown};
+    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.1.1-dev",
+        GakuActors::Activate,GakuActors::RuntimeReady,GakuActors::Tick,GakuActors::ActorTick,GakuActors::Desktop,GakuActors::Shutdown};
     return GAKU_OK;
 }

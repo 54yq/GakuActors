@@ -11,6 +11,7 @@ struct Command { Action action; Preset preset; int instance{}; float position[3]
 struct UiSnapshot {
     Catalog catalog;std::vector<Preset> presets;std::vector<SceneActor> actors;
     std::string notice,storeNotice;bool writable{},busy{},playing{},runtime{};
+    bool admitted{};std::string admissionNotice{"仅在拍摄或 Live 场景启用"};
 };
 class ActorUi {
     char search_[160]{},name_[192]{},bodyAsset_[320]{},faceAsset_[320]{},hairAsset_[320]{};
@@ -47,7 +48,9 @@ public:
         if(character_.empty()&&!s.catalog.characters.empty())character_=s.catalog.characters.front().id;
         if(std::none_of(s.actors.begin(),s.actors.end(),[&](const auto& a){return a.instance==primary_;}))primary_=s.actors.empty()?0:s.actors.front().instance;
         ImGui::TextUnformatted("场景人物管理");ImGui::SameLine();ImGui::TextDisabled("GakuActors · 独立插件");
-        if(ImGui::Button("刷新游戏目录"))commands.push_back({Action::Scan});
+        ImGui::BeginDisabled(!s.admitted);
+        if(ImGui::Button("读取游戏目录"))commands.push_back({Action::Scan});
+        ImGui::EndDisabled();
         ImGui::SameLine();if(ImGui::Button("重新读取预设"))commands.push_back({Action::Reload});
         ImGui::TextWrapped("%s",s.catalog.notice.c_str());
         if(!s.notice.empty())ImGui::TextWrapped("%s",s.notice.c_str());

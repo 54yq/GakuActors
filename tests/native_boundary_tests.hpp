@@ -6,11 +6,12 @@ struct NativeApiTestAccess {
     static void* ObjectClass(void*){return reinterpret_cast<void*>(0x20);}
     static bool IsValue(void*){return valueType;}
     static void* Unbox(void*){return reinterpret_cast<void*>(0x40);}
+    static const char* MethodName(const void*){return "SyntheticMethod";}
     static void* Invoke(const void*,void* instance,void**,void** error) {
         received=instance;if(exception)*error=reinterpret_cast<void*>(0x60);return reinterpret_cast<void*>(0x80);
     }
     template<class Check> static void Run(Check check) {
-        NativeApi api;api.objectClass_=ObjectClass;api.isValue_=IsValue;api.unbox_=Unbox;api.invoke_=Invoke;
+        NativeApi api;api.objectClass_=ObjectClass;api.isValue_=IsValue;api.unbox_=Unbox;api.invoke_=Invoke;api.methodName_=MethodName;
         auto method=reinterpret_cast<const void*>(0x10);auto object=reinterpret_cast<void*>(0x30);
         valueType=false;exception=false;check(api.Call(method,object)==reinterpret_cast<void*>(0x80));check(received==object);
         valueType=true;api.Call(method,object);check(received==reinterpret_cast<void*>(0x40));
