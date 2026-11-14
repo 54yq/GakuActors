@@ -12,6 +12,7 @@ int main() {
     assert(!s.snapshot.admitted&&!s.sceneRequested&&!s.catalogRead);
     assert(s.snapshot.actors.empty()&&s.snapshot.catalog.characters.empty());
     s.commands.push_back({Action::Scan});
+    s.commands.push_back({Action::EnableCreation,{},1}); // unsupported pages cannot enable loading
     s.modelQueue.push_back(Preset{"id","queued","hski","body","head"});
     TickImpl(&s,.016f);
     assert(!s.catalogRequested&&!s.sceneRequested&&!s.snapshot.admitted);

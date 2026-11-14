@@ -6,12 +6,12 @@
 #include <chrono>
 
 namespace GakuActors {
-enum class Action { Scan, Reload, Save, DeletePreset, Spawn, Remove, Move };
+enum class Action { Scan, Reload, Save, DeletePreset, Spawn, Remove, Move, EnableCreation };
 struct Command { Action action; Preset preset; int instance{}; float position[3]{}; };
 struct UiSnapshot {
     Catalog catalog;std::vector<Preset> presets;std::vector<SceneActor> actors;
     std::string notice,storeNotice;bool writable{},busy{},playing{},runtime{};
-    bool admitted{},mutationsEnabled{};std::string admissionNotice{"仅在拍摄或 Live 场景启用"};
+    bool admitted{},mutationsEnabled{},faulted{};std::string admissionNotice{"仅在拍摄或 Live 场景启用"};
 };
 class ActorUi {
     char search_[160]{},name_[192]{},bodyAsset_[320]{},faceAsset_[320]{},hairAsset_[320]{};
@@ -48,7 +48,11 @@ public:
         if(character_.empty()&&!s.catalog.characters.empty())character_=s.catalog.characters.front().id;
         if(std::none_of(s.actors.begin(),s.actors.end(),[&](const auto& a){return a.instance==primary_;}))primary_=s.actors.empty()?0:s.actors.front().instance;
         ImGui::TextUnformatted("场景人物管理");ImGui::SameLine();ImGui::TextDisabled("GakuActors · 独立插件");
-        if(!s.mutationsEnabled)ImGui::TextWrapped("保护模式：仅读取目录和编辑预设。人物新增、移除和移动已停用，等待独立实例加载修复。");
+        bool enabled=s.mutationsEnabled;ImGui::BeginDisabled(!s.admitted||s.busy||s.playing||s.faulted);
+        if(ImGui::Checkbox("启用独立人物加载（实验）",&enabled))commands.push_back({Action::EnableCreation,{},enabled?1:0});
+        ImGui::EndDisabled();
+        if(s.faulted)ImGui::TextWrapped("本次运行已锁定人物操作。请保留日志；重复读取目录不会解除锁定。");
+        else if(!s.mutationsEnabled)ImGui::TextWrapped("目前仅查看目录和预设。实验加载尚未实机验收，启用后才可新增人物。");
         ImGui::BeginDisabled(!s.admitted);
         if(ImGui::Button("读取游戏目录"))commands.push_back({Action::Scan});
         ImGui::EndDisabled();

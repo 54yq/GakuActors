@@ -1,6 +1,6 @@
 # 验证记录
 
-版本：`0.1.4-diagnostics`。离线通过不代表游戏内模型加载成功。
+当前源码版本：`0.2.0-isolated`。下文保留历次保护版与诊断版记录，离线通过不代表新加载流程已通过游戏内验收。
 
 ## 2026-11-15 人物消失故障
 
@@ -58,7 +58,7 @@
 
 本地编译和这些回归结果不证明游戏内恢复成功。历史网页预览使用示例数据，其加入演示也不构成原生模型加载证据。
 
-## 本次安装状态
+## 0.1.4 安装记录
 
 用户退出游戏后，先安装 `0.1.3-recovery`，再完成诊断并替换为 `0.1.4-diagnostics`。最终安装路径为 `G:/Game/Normal/gakumas/GakuLoader/plugins/GakuActors.dll`，SHA256 为 `768CA79BBF6E83F8B8181BD05F94D92A31CD65806ED7DA3E4052C58A36B0879D`，与构建产物一致。
 
@@ -69,3 +69,23 @@
 恢复创建前，必须确认原生 API 的返回类型、独立索引分配和构建生命周期。记录完整的既有实例集合，保证主角色及其他游戏角色不被复用；只允许对已证实为本插件新建且当前身份仍一致的实例做清理。任何归属不明或既有集合变化均应中止，并阻止再次提交。
 
 实际身体／脸／头发、蒙皮骨骼、原生物理、动作同步、连续新增和 GakuMotion 识别仍需逐项验证。目前没有通过记录。
+
+## 0.1.4 真实诊断与 0.2 修复
+
+用户进入场景并显式读取目录后，记录了完整的真实接口：
+
+- Utility／Manager 的 UpdateCacheActorAsync、Manager.UpdateActorAsync 和控制器 BuildAsync 均返回 `UniTask<ValueTuple<Boolean, ICampusActorController>>`。
+- GetResult 返回的元组只有 Item1（Boolean）与 Item2（ICampusActorController）字段，没有 Index getter。旧版在元组上找索引是确定的错误；不能据旧版的该错误认定资源未加载。
+- 原生管理器提供 `CreateActor(Int32, Scene) -> ICampusActorController`、`ContainsActor(Int32)`、`GetActor(Int32)` 和 `DestroyActor(Int32)`；控制器提供 `BuildAsync(VLActorSettings, CampusActorDescriptor, CancellationToken)`。
+- 当前两个既有角色均 build=1、active=1、renderer_active=1。ssmk 使用 `mdl_chr_ssmk-cstm-0133_body`、`mdl_chr_ssmk-base-0000_face`、`mdl_chr_ssmk-cstm-0133_hair`，分别有 219／28／140 条部件骨骼记录；加上道具合计 392 条。kllj 的对应资源为 `mdl_chr_kllj-cstm-0133_body`、`mdl_chr_kllj-base-0000_face`、`mdl_chr_kllj-cstm-0133_hair`，分别 265／28／82 条，加上道具合计 380 条。
+- 两个角色的标准 Unity 蒙皮统计分别为 3 个网格／37986 顶点／5 个材质槽，以及 3 个网格／37015 顶点／5 个材质槽。此统计并不覆盖全部 VL 原生渲染。
+
+本次只读诊断没有创建新人物，上述数字证明现有角色的身体／脸／头发和骨骼部件真实存在，不能当作新增人物成功的证据。骨骼初始化警告出现在本次诊断前，未带具体角色 ID。诊断快照保存在 ignored `build/live-test-20261115/isolated-020/diagnostics-before-fix.log`。
+
+0.2 改为独立索引创建后直接完整构建，字段读取已确认的元组，保留新旧实例隔离与故障锁定。原生材质／渲染可能跨部件合批，因此每个指定部件核对资源、骨骼和原生激活状态，整体再核对原生渲染与材质证据。没有共享缓存更新、字符串销毁、手动骨骼初始化或对游戏原角色的位置操作。
+
+新增离线回归覆盖元组成功／失败／空控制器／类型不匹配、负数实例身份、既有实例复用拒绝、索引被重用、描述身份变化、基线人物消失／状态变化、并发重复提交、未证实租约的移除拒绝，以及故障后重启用拒绝。完整构建通过后仍需实机验证新创建对象隐藏、BuildAsync、原生物理和动作插件识别。
+
+0.2 的 268 项核心检查、120 帧实际启动泵回归和独立 DLL ABI 检查通过，最终运行库重建无编译器警告。还增加了描述共享对象的拒绝：在修改 uniqueId 前确认工厂未返回既有角色的描述对象，并在索引分配、创建控制器、完成构建及激活后分别检查既有基线。任务异常会记录托管异常类型与消息。
+
+修复版产物 SHA256 为 `0877E5D400F06E4B9502241C5F0EC43F37BA51738CD963B9FA7E49F1D0A82490`，保存在 `build/GakuActors.dll` 及 ignored `build/live-test-20261115/isolated-020/GakuActors-0.2.0-isolated.dll`。安装检查确认游戏仍在运行，未替换游戏文件，当前仍为 0.1.4 诊断版。延迟记录与待执行安装脚本位于同目录。0.2 新增人物尚未实测，不能报告模型导入、原生物理或动作联动已经修复通过。

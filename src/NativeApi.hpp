@@ -1,11 +1,13 @@
 #pragma once
 #include "Catalog.hpp"
 #include "ModelReadiness.hpp"
+#include "ActorOwnership.hpp"
 #include <windows.h>
 #include <chrono>
 #include <cstring>
 #include <stdexcept>
 #include <cctype>
+#include <cmath>
 
 namespace GakuActors {
 // IL2CPP calls are restricted to the loader's Unity-thread callbacks. No game
@@ -52,6 +54,17 @@ class NativeApi {
     const void* (*fields_)(void*,void**){};
     const char* (*fieldName_)(const void*){};
     void* (*fieldType_)(const void*){};
+    void* (*fieldValue_)(const void*,void*){};
+    bool creationEnabled_{},faulted_{};
+    std::vector<ActorLease> owned_;
+    struct Pending {
+        bool active{},cancelled{};
+        void* task{},*awaiter{},*cancellation{},*resultClass{};
+        ActorLease lease;ModelAssets requested;
+        std::vector<ActorIdentity> baseline;
+        float position[3]{},rotation[4]{0,0,0,1};
+        std::chrono::steady_clock::time_point started;
+    } pending_;
     std::vector<void*> frameRoots_;
     int admittedScene_{};
     const void* activeSceneMethod_{};
@@ -66,15 +79,19 @@ public:
         Pin(const Pin&)=delete;
         void* Get()const{return handle?api->handleTarget_(handle):nullptr;}
     };
-    // Recovery build: no scene mutation path is compiled. Do not re-enable
-    // until allocation and ownership can be proven independently of game cache.
-    static constexpr bool MutationsEnabled(){return false;}
+    bool MutationsEnabled()const{return creationEnabled_&&!faulted_;}
+    bool Busy()const{return pending_.active;}
+    bool Faulted()const{return faulted_;}
+    bool EnableCreation(bool enabled) {
+        if(enabled&&faulted_)return false;
+        creationEnabled_=enabled;return true;
+    }
     static constexpr const char* MutationBlockReason(){
-        return "保护模式：人物新增、移除和移动已停用；等待独立实例加载修复";
+        return "人物操作未启用或已因故障锁定；请查看诊断日志";
     }
     bool RejectMutation(const char* operation) {
-        notice=MutationBlockReason();
-        Trace((std::string("Scene mutation BLOCKED (recovery build): ")+operation).c_str());
+        if(!faulted_)notice=MutationBlockReason();
+        Trace((std::string("Scene mutation BLOCKED: ")+operation).c_str());
         return false;
     }
     std::string notice{"等待游戏运行时"};
@@ -104,6 +121,7 @@ public:
         Export(typeName_,"il2cpp_type_get_name");Export(il2cppFree_,"il2cpp_free");
         Export(fields_,"il2cpp_class_get_fields");Export(fieldName_,"il2cpp_field_get_name");
         Export(fieldType_,"il2cpp_field_get_type");
+        Export(fieldValue_,"il2cpp_field_get_value_object");
         return ok;
     }
     void* Class(const char* ns,const char* name) {
@@ -206,7 +224,17 @@ public:
         void* exception=nullptr;
         if(target&&isValue_(objectClass_(target)))target=unbox_(target);
         void* value=invoke_(method,target,args,&exception);
-        if(exception)throw std::runtime_error(std::string("游戏方法返回异常：")+methodName_(method));
+        if(exception) {
+            std::string message=std::string("游戏方法返回异常：")+methodName_(method);
+            if(className_&&classNamespace_&&newHandle_&&handleTarget_&&freeHandle_)try {
+                Pin error(*this,exception);message+=" ["+ClassName(objectClass_(error.Get()))+"]";
+                if(const auto getter=On(error.Get(),"get_Message")) {
+                    void* nested=nullptr;void* detail=invoke_(getter,error.Get(),nullptr,&nested);
+                    if(!nested&&detail&&stringLength_&&stringChars_)message+=" "+String(detail);
+                }
+            }catch(...){}
+            throw std::runtime_error(message);
+        }
         return value;
     }
     std::string String(void* value) {
@@ -292,6 +320,7 @@ public:
             const int actorScene=SceneOf(go);if(scene&&actorScene!=scene)continue;
             SceneActor entry;entry.instance=Int(actor,"GetInstanceID");entry.scene=actorScene;entry.name=Text(go,"get_name");
             if(scene)Pose(actor,entry.position,entry.rotation);
+            for(const auto& lease:owned_)if(lease.ready&&lease.identity.instance==entry.instance&&lease.identity.scene==entry.scene&&LeaseMatches(lease,Identify(actor))){entry.owned=true;entry.preset=lease.preset;}
             result.push_back(std::move(entry));
         }
         // Observation never reconciles or releases game cache entries.
@@ -419,9 +448,7 @@ public:
         if(model.body.empty()||model.face.empty()||model.hair.empty())throw std::runtime_error("原生描述未提供完整身体、脸、头发资源");
         return model;
     }
-    bool StartSpawn(const Preset&,int) {return RejectMutation("spawn");}
-    bool RemoveActor(int) {return RejectMutation("remove");}
-    bool MoveActor(int,const float*) {return RejectMutation("move");}
+    #include "NativeSpawn.inl"
     bool DiagnoseActors() {
         const int scene=PerformanceScene();if(!scene)return false;
         Trace(("Diagnostic actors BEGIN: owner_scene="+std::to_string(scene)+" (read only; no humanoid bone lookup)").c_str());
@@ -481,13 +508,19 @@ public:
         Trace(("Diagnostic actors END: inspected="+std::to_string((std::min)(count,size_t{64}))).c_str());return true;
     }
     void SuspendScene() {
+        creationEnabled_=false;CancelPending();
+        for(auto it=owned_.begin();it!=owned_.end();) {
+            if(!it->ready){++it;continue;}
+            bool released=false;try{released=ReleaseLease(*it);}catch(...){}
+            if(released)it=owned_.erase(it);else{Fault("离开场景时未确认独立实例释放，保留记录");++it;}
+        }
         admittedScene_=0;
         notice="当前页面休眠；进入拍摄或 Live 后可按需读取目录";
     }
     void Shutdown() {
-        // Release only our temporary GC roots. Never destroy scene objects or
-        // cancel game tasks during shutdown in the recovery build.
-        admittedScene_=0;EndFrame();
+        // The host may shut down off the Unity thread. Do not invoke Unity or
+        // destroy actors here; the process/owning scene handles destruction.
+        creationEnabled_=false;admittedScene_=0;DropPending(false);owned_.clear();EndFrame();
     }
 };
 }

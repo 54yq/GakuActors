@@ -83,7 +83,7 @@ static void TickImpl(void* context,float) {
     next.runtime=true;
     const auto now=std::chrono::steady_clock::now();
     auto publish=[&]{
-        next.busy=false;next.mutationsEnabled=s.native.MutationsEnabled();next.notice=s.native.notice;
+        next.busy=s.native.Busy();next.mutationsEnabled=s.native.MutationsEnabled();next.faulted=s.native.Faulted();next.notice=s.native.notice;
         next.presets=s.store.presets;next.storeNotice=s.store.notice;next.writable=s.store.Writable();
         std::lock_guard<std::mutex> lock(s.mutex);s.snapshot=std::move(next);
     };
@@ -121,8 +121,12 @@ static void TickImpl(void* context,float) {
                 if(next.playing){s.native.notice="请先在动作插件中停止播放";break;}
                 s.native.RemoveActor(command.instance);s.nextScan={};break;
             case Action::Move:s.native.MoveActor(command.instance,command.position);break;
+            case Action::EnableCreation:
+                if(next.admitted&&!next.playing)s.native.EnableCreation(command.instance!=0);
+                break;
             }
         }
+        s.native.PollSpawn(); // Only our own pending task; no cache or catalog load.
         if(next.admitted&&s.catalogRequested) {
             s.catalogRequested=false;
             // Explicit, admitted-scene diagnostics describe metadata and read
@@ -167,7 +171,7 @@ static void DesktopImpl(void* context) {
     ImGui::BeginDisabled(!snapshot.admitted);
     if(ImGui::Button("打开人物预设弹窗"))s.dialogOpen=true;
     ImGui::EndDisabled();
-    ImGui::TextWrapped("保护版：人物目录与头身预设；场景人物操作已停用。");
+    ImGui::TextWrapped("人物目录与头身预设；独立加载默认关闭，可显式启用实验。");
     if(s.dialogOpen&&snapshot.admitted) {
         const auto display=ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowSize(ImVec2((std::min)(960.0f,(std::max)(280.0f,display.x-32)),
@@ -211,7 +215,7 @@ static void Shutdown(void* context) noexcept {
 extern "C" GAKU_PLUGIN_EXPORT GakuStatus GakuPlugin_Query(uint32_t version,uint32_t bytes,GakuPluginDescriptor* output) {
     if(version!=GAKU_ABI_VERSION)return GAKU_E_VERSION;
     if(!output)return GAKU_E_INVALID_ARGUMENT;if(bytes<sizeof(*output))return GAKU_E_SIZE;
-    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.1.4-diagnostics",
+    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.2.0-isolated",
         GakuActors::Activate,GakuActors::RuntimeReady,GakuActors::Tick,GakuActors::ActorTick,GakuActors::Desktop,GakuActors::Shutdown};
     return GAKU_OK;
 }
