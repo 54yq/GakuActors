@@ -12,8 +12,10 @@ int main() {
     assert(!s.snapshot.admitted&&!s.sceneRequested&&!s.catalogRead);
     assert(s.snapshot.actors.empty()&&s.snapshot.catalog.characters.empty());
     s.commands.push_back({Action::Scan});
+    s.modelQueue.push_back(Preset{"id","queued","hski","body","head"});
     TickImpl(&s,.016f);
     assert(!s.catalogRequested&&!s.sceneRequested&&!s.snapshot.admitted);
+    assert(s.modelQueue.empty()); // no deferred model resolution leaks into startup
     s.commands.push_back({Action::Spawn,Preset{"id","test","hski","body","head"},1});
     TickImpl(&s,.016f);
     assert(s.native.owned.empty()&&s.native.pending.task==nullptr);

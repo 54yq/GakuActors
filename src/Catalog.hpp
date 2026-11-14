@@ -10,6 +10,7 @@ using Json = nlohmann::json;
 struct Character { std::string id, name; bool special{}; };
 struct Part { std::string id, name, character, resource; bool head{}; };
 struct ModelAssets {std::string character,body,face,hair,factory;};
+struct ModelChoice {std::string label,body,face,hair;};
 struct Preset {
     std::string id, name, character, body, head, factory;
     std::string bodyAsset, faceAsset, hairAsset;
@@ -36,6 +37,20 @@ inline const Character* FindCharacter(const Catalog& c, const std::string& id) {
 inline const Part* FindPart(const std::vector<Part>& parts,const std::string& id) {
     for(const auto& item:parts)if(item.id==id)return &item;
     return nullptr;
+}
+inline std::vector<ModelChoice> ModelChoices(const Catalog& catalog,const std::string& category,bool heads,bool showAll) {
+    std::vector<ModelChoice> choices;
+    for(const auto& model:catalog.models) {
+        if(!showAll&&model.character!=category)continue;
+        if(heads&&(model.face.empty()||model.hair.empty()))continue;
+        if(!heads&&model.body.empty())continue;
+        const bool duplicate=std::any_of(choices.begin(),choices.end(),[&](const auto& x){return heads?x.face==model.face&&x.hair==model.hair:x.body==model.body;});
+        if(duplicate)continue;
+        const auto* c=FindCharacter(catalog,model.character);
+        const auto name=c?c->name:model.character;
+        choices.push_back({name+" · "+(heads?model.face+" + "+model.hair:model.body),model.body,model.face,model.hair});
+    }
+    return choices;
 }
 inline bool TextValid(const std::string& text, size_t maximum=256, bool empty=false) {
     if ((!empty && text.empty()) || text.size()>maximum) return false;

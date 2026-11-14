@@ -84,8 +84,10 @@ public:
                 if(ImGui::Selectable((p.name+"##preset").c_str(),selection_==p.id)){selection_=p.id;editor_=false;}
                 ImGui::TextDisabled("%s",p.builtin?"游戏默认":"自定义预设");
                 if(p.factory.empty()) {
-                    ImGui::TextWrapped("身体：%s",PartLabel(s.catalog.bodies,p.body).c_str());
-                    ImGui::TextWrapped("头部：%s",PartLabel(s.catalog.heads,p.head).c_str());
+                    const auto bodyLabel=p.bodyAsset.empty()?PartLabel(s.catalog.bodies,p.body):p.bodyAsset;
+                    const auto headLabel=p.faceAsset.empty()?PartLabel(s.catalog.heads,p.head):p.faceAsset+" + "+p.hairAsset;
+                    ImGui::TextWrapped("身体：%s",bodyLabel.c_str());
+                    ImGui::TextWrapped("头部：%s",headLabel.c_str());
                 } else ImGui::TextDisabled("使用原生人物组合");
                 if(ImGui::Button(p.builtin?"另存为预设":"编辑"))BeginEdit(p,p.builtin);
                 ImGui::SameLine();ImGui::BeginDisabled(!experimental_||!s.runtime||s.busy||s.playing||!primary_);
@@ -109,14 +111,27 @@ public:
                     if(!advanced_){PartCombo("身体／服装",s.catalog.bodies,body_);PartCombo("头部／发型",s.catalog.heads,head_);}
                     ImGui::Checkbox("直接指定已知模型资源",&advanced_);
                     if(advanced_){
-                        if(!s.catalog.models.empty()&&ImGui::BeginCombo("已读取的身体模型",bodyAsset_[0]?bodyAsset_:"选择模型资源")) {
-                            for(const auto& m:s.catalog.models)if(ImGui::Selectable((m.character+" · "+m.body+"##body_"+m.factory).c_str()))std::snprintf(bodyAsset_,sizeof(bodyAsset_),"%s",m.body.c_str());
+                        const auto bodies=ModelChoices(s.catalog,character_,false,crossCharacter_);
+                        const auto heads=ModelChoices(s.catalog,character_,true,crossCharacter_);
+                        if(ImGui::BeginCombo("已读取的身体模型",bodyAsset_[0]?bodyAsset_:"选择模型资源")) {
+                            for(const auto& m:bodies) {
+                                const bool selected=m.body==bodyAsset_;
+                                if(ImGui::Selectable((m.label+"##body_"+m.body).c_str(),selected))std::snprintf(bodyAsset_,sizeof(bodyAsset_),"%s",m.body.c_str());
+                                if(selected)ImGui::SetItemDefaultFocus();
+                            }
+                            if(bodies.empty())ImGui::TextDisabled("该分类暂无已解析资源；可显示其他人物或使用服装模式");
                             ImGui::EndCombo();
                         }
-                        if(!s.catalog.models.empty()&&ImGui::BeginCombo("已读取的头部模型",faceAsset_[0]?faceAsset_:"选择脸部与头发组合")) {
-                            for(const auto& m:s.catalog.models)if(ImGui::Selectable((m.character+" · "+m.face+"##head_"+m.factory).c_str())) {
-                                std::snprintf(faceAsset_,sizeof(faceAsset_),"%s",m.face.c_str());std::snprintf(hairAsset_,sizeof(hairAsset_),"%s",m.hair.c_str());
+                        const auto headPreview=faceAsset_[0]?std::string(faceAsset_)+" + "+hairAsset_:"选择脸部与头发组合";
+                        if(ImGui::BeginCombo("已读取的头部模型",headPreview.c_str())) {
+                            for(const auto& m:heads) {
+                                const bool selected=m.face==faceAsset_&&m.hair==hairAsset_;
+                                if(ImGui::Selectable((m.label+"##head_"+m.face+"|"+m.hair).c_str(),selected)) {
+                                    std::snprintf(faceAsset_,sizeof(faceAsset_),"%s",m.face.c_str());std::snprintf(hairAsset_,sizeof(hairAsset_),"%s",m.hair.c_str());
+                                }
+                                if(selected)ImGui::SetItemDefaultFocus();
                             }
+                            if(heads.empty())ImGui::TextDisabled("该分类暂无已解析的脸部与头发组合");
                             ImGui::EndCombo();
                         }
                         ImGui::SetNextItemWidth(-1);ImGui::InputText("身体资源",bodyAsset_,sizeof(bodyAsset_));

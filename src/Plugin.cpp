@@ -19,6 +19,7 @@ struct State {
     std::mutex mutex;std::deque<Command> commands;
     std::atomic<bool> ready{},stopped{};bool catalogRead{},catalogRequested{},sceneRequested{},wasAdmitted{};
     SceneGate gate;
+    std::vector<Preset> modelQueue;size_t modelCursor{},modelFailures{};
     bool dialogOpen{false};
     std::chrono::steady_clock::time_point nextScan{},nextCatalog{};
     struct Playback {uint32_t abiVersion,structSize;uint32_t(*isPlaying)();} playback{};
@@ -94,7 +95,7 @@ static void TickImpl(void* context,float) {
         s.native.SetAdmittedScene(next.admitted?s.gate.Scene():0);
         next.admissionNotice=next.admitted?(s.gate.Mode()==PerformanceMode::Live?"Live 场景已确认":"拍摄场景已确认"):"当前页面休眠；仅在拍摄或 Live 场景启用";
         if(!next.admitted) {
-            s.catalogRequested=false;s.sceneRequested=false;next.actors.clear();next.playing=false;
+            s.catalogRequested=false;s.sceneRequested=false;s.modelQueue.clear();s.modelCursor=0;next.actors.clear();next.playing=false;
             if(s.wasAdmitted){s.native.SuspendScene();Log(s,"Performance scene left; catalog/roster scanning suspended");}
             s.wasAdmitted=false;
             // Completion of our own cancelled task is cleanup, not a scan or a
@@ -113,9 +114,11 @@ static void TickImpl(void* context,float) {
             case Action::Save:s.store.Save(command.preset);break;
             case Action::DeletePreset:s.store.Remove(command.preset.id);break;
             case Action::Spawn:
+                Log(s,"Spawn command: preset="+command.preset.id+" category="+command.preset.character+" body="+command.preset.bodyAsset+" face="+command.preset.faceAsset+" hair="+command.preset.hairAsset);
                 if(!next.admitted){s.native.notice="当前页面不支持加入人物";break;}
                 if(next.playing){s.native.notice="请先在动作插件中停止播放";break;}
-                s.native.StartSpawn(command.preset,command.instance);s.nextScan={};break;
+                if(!s.native.StartSpawn(command.preset,command.instance))Log(s,s.native.notice,GAKU_LOG_WARNING);
+                s.nextScan={};break;
             case Action::Remove:
                 if(!next.admitted)break;
                 if(next.playing){s.native.notice="请先在动作插件中停止播放";break;}
@@ -133,9 +136,21 @@ static void TickImpl(void* context,float) {
         if(next.admitted&&s.catalogRequested) {
             s.catalogRequested=false;
             Log(s,"Catalog request BEGIN (explicit user action, admitted scene)");
-            try{auto catalog=s.native.ScanCatalog();catalog.revision=next.catalog.revision+1;next.catalog=std::move(catalog);s.catalogRead=true;Log(s,"Game master catalog read: "+std::to_string(next.catalog.characters.size())+" characters, "+std::to_string(next.catalog.bodies.size())+" bodies, "+std::to_string(next.catalog.heads.size())+" heads");}
+            try{auto catalog=s.native.ScanCatalog();catalog.revision=next.catalog.revision+1;next.catalog=std::move(catalog);s.catalogRead=true;Log(s,"Game master catalog read: "+std::to_string(next.catalog.characters.size())+" characters, "+std::to_string(next.catalog.bodies.size())+" bodies, "+std::to_string(next.catalog.heads.size())+" heads");
+                s.modelQueue.clear();s.modelCursor=0;s.modelFailures=0;
+                for(const auto& p:next.catalog.defaults)if(p.factory.empty())s.modelQueue.push_back(p);
+            }
             catch(const std::exception& e){next.catalog.notice=std::string("目录读取未完成：")+e.what();Log(s,next.catalog.notice,GAKU_LOG_WARNING);}
             Log(s,"Catalog request END; no automatic retries");
+        }
+        if(next.admitted&&s.modelCursor<s.modelQueue.size()) {
+            // Resolve definitions, not assets, at most one outfit per frame.
+            // This work is scheduled only by an explicit admitted-scene scan.
+            try{next.catalog.models.push_back(s.native.ResolveModelAssets(s.modelQueue[s.modelCursor]));}
+            catch(const std::exception& e){if(s.modelFailures++<3)Log(s,std::string("Model definition resolve skipped: ")+e.what(),GAKU_LOG_WARNING);}
+            ++s.modelCursor;
+            next.catalog.notice="目录已读取；模型资源解析 "+std::to_string(s.modelCursor)+"/"+std::to_string(s.modelQueue.size())+"；资源定义不代表已加载人物";
+            if(s.modelCursor==s.modelQueue.size())Log(s,"Model definitions complete: resolved="+std::to_string(next.catalog.models.size())+" skipped="+std::to_string(s.modelFailures));
         }
         if(next.admitted)s.native.PollSpawn();
         if(next.admitted&&s.sceneRequested&&now>=s.nextScan){next.actors=s.native.ScanScene();s.nextScan=now+std::chrono::milliseconds(500);}
@@ -203,7 +218,7 @@ static void Shutdown(void* context) noexcept {
 extern "C" GAKU_PLUGIN_EXPORT GakuStatus GakuPlugin_Query(uint32_t version,uint32_t bytes,GakuPluginDescriptor* output) {
     if(version!=GAKU_ABI_VERSION)return GAKU_E_VERSION;
     if(!output)return GAKU_E_INVALID_ARGUMENT;if(bytes<sizeof(*output))return GAKU_E_SIZE;
-    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.1.1-dev",
+    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景人物管理","0.1.2-dev",
         GakuActors::Activate,GakuActors::RuntimeReady,GakuActors::Tick,GakuActors::ActorTick,GakuActors::Desktop,GakuActors::Shutdown};
     return GAKU_OK;
 }

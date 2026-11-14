@@ -5,6 +5,7 @@
 #include <iostream>
 #include "native_boundary_tests.hpp"
 #include "SceneGate.hpp"
+#include "ModelReadiness.hpp"
 
 int main() {
     using namespace GakuActors;
@@ -50,6 +51,24 @@ int main() {
     gate.Observe("Photography",0,"Photography",600);check(!gate.Fresh(600));
     gate.Observe("Live",9,"Photography",700);check(!gate.Fresh(700));
     gate.Observe("Photography",7,"env_3d_dress_dressroom-00-00-noon",800);check(!gate.Fresh(800));
+    ModelReadiness emptyActor{};check(!ValidateModelReadiness(emptyActor,error));
+    ModelReadiness complete{true,true,true,true,3,2,5000,4,65};check(ValidateModelReadiness(complete,error));
+    auto incomplete=complete;incomplete.facePart=false;check(!ValidateModelReadiness(incomplete,error));
+    incomplete=complete;incomplete.vertices=0;check(!ValidateModelReadiness(incomplete,error));
+    incomplete=complete;incomplete.materials=0;check(!ValidateModelReadiness(incomplete,error));
+    incomplete=complete;incomplete.bones=0;check(!ValidateModelReadiness(incomplete,error));
+    incomplete=complete;incomplete.rendererActive=false;check(!ValidateModelReadiness(incomplete,error));
+    incomplete=complete;incomplete.buildSuccess=false;check(!ValidateModelReadiness(incomplete,error));
+    Catalog models;models.characters={{"hski","花海咲季"},{"nasr","老师"}};
+    models.models={{"nasr","teacher_body","teacher_face","hair_a","factory_a"},{"nasr","teacher_body","teacher_face","hair_b","factory_b"},
+        {"hski","idol_body","idol_face","idol_hair","outfit"}};
+    check(ModelChoices(models,"nasr",false,false).size()==1);
+    const auto headChoices=ModelChoices(models,"nasr",true,false);
+    check(headChoices.size()==2);check(headChoices[0].label!=headChoices[1].label);
+    check(ModelChoices(models,"hski",false,false).size()==1);
+    check(ModelChoices(models,"hski",false,true).size()==2);
+    raw.character="hski";raw.bodyAsset="mdl_chr_nasr-casl-0000_body";
+    check(ValidatePreset(raw,error)); // classification never restricts model identity
     // This test owns exactly these files; no recursive deletion or user paths.
     std::filesystem::remove(file);std::filesystem::remove(root);
     std::cout<<checks<<" preset validation, Unicode persistence, corruption and catalogue checks passed\n";
