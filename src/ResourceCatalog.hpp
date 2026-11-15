@@ -39,6 +39,37 @@ inline std::vector<ModelResource> ResourceChoices(const Catalog& c,const std::st
     for(const auto& r:c.resources)if(r.kind==kind&&(all||r.character==character))out.push_back(r);
     std::sort(out.begin(),out.end(),[](const auto& a,const auto& b){return a.resource<b.resource;});return out;
 }
+inline std::vector<ModelResource> PreLiveResourceChoices(const Catalog& c,const std::string& character,const std::string& kind) {
+    auto out=ResourceChoices(c,character,kind);
+    auto add=[&](const Part& part,const std::string& asset) {
+        if(part.character!=character)return;
+        auto parsed=ParseModelResource(asset);
+        if(!parsed||parsed->kind!=kind)return;
+        if(std::none_of(out.begin(),out.end(),[&](const auto& r){return r.resource==asset;})) {
+            parsed->character=character;parsed->source=part.name;out.push_back(std::move(*parsed));
+        }
+    };
+    for(const auto& part:c.bodies)add(part,part.resource);
+    for(const auto& part:c.heads){add(part,part.faceResource);add(part,part.resource);}
+    std::sort(out.begin(),out.end(),[](const auto& a,const auto& b){return a.resource<b.resource;});
+    return out;
+}
+inline bool ResolvePreLivePreset(const Catalog& c,const Preset& preset,const std::string& character,ModelAssets& result,std::string& error) {
+    if(preset.character!=character){error="预设不属于当前人物分类";return false;}
+    if(!preset.factory.empty()){error="特殊人物预设暂不能转换为身体、脸和头发";return false;}
+    ModelAssets candidate;candidate.character=character;
+    if(!preset.bodyAsset.empty()){candidate.body=preset.bodyAsset;candidate.face=preset.faceAsset;candidate.hair=preset.hairAsset;}
+    else {
+        const auto* body=FindPart(c.bodies,preset.body);const auto* head=FindPart(c.heads,preset.head);
+        if(!body||!head){error="预设引用的服装不在已读取的目录中";return false;}
+        candidate.body=body->resource;candidate.face=head->faceResource;candidate.hair=head->resource;
+    }
+    for(const auto& [asset,kind]:std::vector<std::pair<std::string,std::string>>{{candidate.body,"body"},{candidate.face,"face"},{candidate.hair,"hair"}}) {
+        auto parsed=ParseModelResource(asset);
+        if(!parsed||parsed->kind!=kind){error="预设缺少有效的身体、脸或头发模型资源";return false;}
+    }
+    result=std::move(candidate);error.clear();return true;
+}
 struct ResourceNamePattern {std::string before,after,resourcePrefix;int slot{1};};
 inline std::optional<ResourceNamePattern> LearnResourcePattern(const std::string& resource,const std::string& bundle) {
     if(!ParseModelResource(resource))return {};

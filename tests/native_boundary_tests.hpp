@@ -1,6 +1,75 @@
 #pragma once
 namespace GakuActors {
 struct NativeApiTestAccess {
+    static inline int diagnosticFieldReads{};
+    template<class Check> static void LiveDiagnosticFieldGuard(Check check) {
+        NativeApi api;diagnosticFieldReads=0;
+        api.objectClass_=[](void*)->void*{return Tag(0xd01);};
+        api.parent_=[](void*)->void*{return nullptr;};
+        api.fields_=[](void*,void** it)->const void*{if(*it)return nullptr;*it=Tag(1);return Tag(0xd02);};
+        api.fieldName_=[](const void*){return "candidate";};
+        api.fieldType_=[](const void*)->void*{return Tag(0xd03);};
+        api.fieldFlags_=[](const void*)->uint32_t{return 0;};
+        api.byRef_=[](void*){return false;};api.typeCode_=[](void*){return 8;};
+        api.fieldValue_=[](const void*,void*)->void*{++diagnosticFieldReads;return nullptr;};
+        check(!api.DiagnosticReferenceField(Tag(0xd04),"candidate")&&diagnosticFieldReads==0);
+        api.typeCode_=[](void*){return 0x12;};api.byRef_=[](void*){return true;};
+        check(!api.DiagnosticReferenceField(Tag(0xd04),"candidate")&&diagnosticFieldReads==0);
+        api.byRef_=[](void*){return false;};
+        check(!api.DiagnosticReferenceField(Tag(0xd04),"candidate")&&diagnosticFieldReads==1);
+        api.typeCode_=[](void*){return 0x0e;};
+        check(!api.DiagnosticReferenceField(Tag(0xd04),"candidate")&&diagnosticFieldReads==2);
+        api.fieldFlags_=[](const void*)->uint32_t{return 0x10;};
+        check(!api.DiagnosticReferenceField(Tag(0xd04),"candidate")&&diagnosticFieldReads==2);
+    }
+    struct FakeResource {int id,scene;bool active;};
+    static inline FakeResource fakeResource{41,-7,true};
+    static inline int fakeInt{},fakeScene{};static inline bool fakeBool{},fakeSetterFails{};
+    static void* ResourceClass(void* p) {return p==&fakeScene?Tag(0x410):p==&fakeResource?Tag(0x411):Tag(0x412);}
+    static const void* ResourceMethods(void* c,void** it) {
+        if(c!=Tag(0x411))return nullptr;
+        uintptr_t index=reinterpret_cast<uintptr_t>(*it);*it=Tag(index+1);
+        return index<4?Tag(0x420+index):nullptr;
+    }
+    static const char* ResourceMethodName(const void* m) {
+        if(m==Tag(0x420))return "GetInstanceID";
+        if(m==Tag(0x421))return "get_scene";
+        if(m==Tag(0x422))return "get_activeSelf";
+        return "SetActive";
+    }
+    static void* ResourceInvoke(const void* m,void* object,void** args,void** ex) {
+        if(object!=&fakeResource){*ex=Tag(0x499);return nullptr;}
+        if(m==Tag(0x420)){fakeInt=fakeResource.id;return &fakeInt;}
+        if(m==Tag(0x421)){fakeScene=fakeResource.scene;return &fakeScene;}
+        if(m==Tag(0x422)){fakeBool=fakeResource.active;return &fakeBool;}
+        if(m==Tag(0x423)){fakeResource.active=*static_cast<bool*>(args[0]);if(fakeSetterFails)*ex=Tag(0x499);return nullptr;}
+        return nullptr;
+    }
+    template<class Check> static void ResourceWrites(Check check) {
+        NativeApi api;fakeResource={41,-7,true};fakeSetterFails=false;
+        api.objectClass_=ResourceClass;api.parent_=[](void*)->void*{return nullptr;};
+        api.methods_=ResourceMethods;api.methodName_=ResourceMethodName;
+        api.methodCount_=[](const void* m)->uint32_t{return m==Tag(0x423)?1:0;};
+        api.methodFlags_=[](const void*,uint32_t*)->uint32_t{return 0;};
+        api.param_=[](const void*,uint32_t)->void*{return Tag(2);};
+        api.result_=[](const void* m)->void*{return Tag(m==Tag(0x420)?8:m==Tag(0x422)?2:m==Tag(0x423)?1:0x11);};
+        api.typeCode_=[](void* t)->int{return static_cast<int>(reinterpret_cast<uintptr_t>(t));};
+        api.byRef_=[](void*){return false;};api.isValue_=[](void* c){return c==Tag(0x410);};
+        api.invoke_=ResourceInvoke;api.unbox_=[](void* p)->void*{return p;};
+        api.valueSize_=[](void*,uint32_t*)->int{return 4;};
+        api.newHandle_=[](void* p,bool)->void*{return p;};api.handleTarget_=[](void* p)->void*{return p;};api.freeHandle_=[](void*){};
+        check(api.SaveAndWriteResource(&fakeResource,&fakeResource,-7,SceneResourceKind::Background,"activeSelf",false));
+        check(!fakeResource.active&&api.resourceLeases_.size()==1);
+        fakeResource.scene=-8;check(!api.RestoreResources());check(!fakeResource.active);
+        fakeResource.scene=-7;check(api.RestoreResources()&&fakeResource.active&&api.resourceLeases_.empty());
+        fakeSetterFails=true;bool threw=false;
+        try{api.SaveAndWriteResource(&fakeResource,&fakeResource,-7,SceneResourceKind::Background,"activeSelf",false);}catch(...){threw=true;}
+        check(threw&&!fakeResource.active&&api.resourceLeases_.size()==1);
+        fakeSetterFails=false;check(api.RestoreResources()&&fakeResource.active);
+        fakeResource.active=false;
+        check(api.SaveAndWriteResource(&fakeResource,&fakeResource,-7,SceneResourceKind::Background,"activeSelf",false));
+        check(api.RestoreResources()&&!fakeResource.active);
+    }
     static inline bool valueType{},exception{};
     static inline void* received{};
     static void* ObjectClass(void*){return reinterpret_cast<void*>(0x20);}
@@ -119,6 +188,23 @@ struct NativeApiTestAccess {
         check(indexCalls==previous&&indexFreed==2&&!api.ResourceScanActive());
     }
     template<class Check> static void Run(Check check) {
+        check(NativeApi::SupportedProp("Root_Microphone","Prop_Microphone"));
+        check(NativeApi::SupportedProp("Root_Penlight","Prop_Penlight"));
+        check(!NativeApi::SupportedProp("Root_Body","Prop_Body"));
+        check(!NativeApi::SupportedProp("Root_Microphone","Prop_Body"));
+        check(!NativeApi::SupportedProp("Root_","Prop_"));
+        NativeApi resources;SceneResource unknown;unknown.generation=1;unknown.instance=10;
+        check(resources.ScanResources().empty());
+        check(!resources.SetResourceHidden(unknown,true));
+        check(resources.RestoreResources());
+        const unsigned char sample[]{'a','b','c'};check(NativeApi::ThumbnailBase64(sample,3)=="YWJj");
+        check(NativeApi::ThumbnailBase64(sample,2)=="YWI=");
+        check(NativeApi::ThumbnailBase64(sample,1)=="YQ==");
+        std::string thumbnailStatus;check(resources.ReadLoadedThumbnail("test",thumbnailStatus).empty());
+        check(resources.RestoreCamera());float color[]{0,1,0,1};check(!resources.ApplyCameraColor(color));
+        float same[]{0,1,0,1},different[]{0,0,0,1};check(resources.CameraSame(color,same));check(!resources.CameraSame(color,different));
+        check(NativeApi::ProtectedSceneName("characteractor"));check(NativeApi::ProtectedSceneName("wall_collider"));
+        check(!NativeApi::ProtectedSceneName("stage_decor"));
         NativeApi api;api.objectClass_=ObjectClass;api.isValue_=IsValue;api.unbox_=Unbox;api.invoke_=Invoke;api.methodName_=MethodName;
         auto method=reinterpret_cast<const void*>(0x10);auto object=reinterpret_cast<void*>(0x30);
         valueType=false;exception=false;check(api.Call(method,object)==reinterpret_cast<void*>(0x80));check(received==object);
@@ -143,17 +229,28 @@ struct NativeApiTestAccess {
         recovery.SyncPresetActorNames(valid);check(recovery.pending_.displayName=="test");
         recovery.pending_.active=false;
         recovery.SetAdmittedScene(7);recovery.Shutdown();check(recovery.PerformanceScene()==0);
-        check(!recovery.DiagnoseContracts());check(!recovery.DiagnoseActors());
+        check(!recovery.DiagnoseContracts());check(!recovery.DiagnoseActors());check(!recovery.DiagnoseActorManagerRelations());check(!recovery.DiagnoseLiveBindings());
         check(recovery.EnableCreation(true));check(recovery.MutationsEnabled());
         check(!recovery.StartSpawn(valid,123)); // No runtime exports: cannot mutate.
         recovery.Fault("synthetic ambiguous ownership");check(!recovery.MutationsEnabled());
         check(!recovery.EnableCreation(true));
         recovery.SuspendScene();check(!recovery.EnableCreation(true)); // scene changes do not reset a fault
         check(!recovery.DestroyLease(ActorLease{})); // unproven lease enters no game API
+        // Both apply and restore must be blocked before accessing the game
+        // after the observed actor identity change.
+        NativeApi model;model.SetAdmittedScene(7);model.module_=reinterpret_cast<HMODULE>(1);
+        model.invoke_=Invoke;model.freeHandle_=[](void*){};model.domainGet_=[]()->void*{return nullptr;};
+        model.assemblies_=[](void*,size_t* n)->const void**{*n=0;return nullptr;};
+        check(!model.MutationsEnabled());
+        check(!model.StartActorModel(123,7,"test",{"body","face","hair"},false));
+        check(model.notice.find("暂时停用")!=std::string::npos&&!model.Busy());
+        check(!model.StartActorModel(123,7,"test",{},true)&&model.notice.find("暂时停用")!=std::string::npos&&!model.Busy());
         MetadataOnly(check);
         TupleDecoder(check);
         PendingAndRemovalGuards(check);
         ResourceIndexBudget(check);
+        ResourceWrites(check);
+        LiveDiagnosticFieldGuard(check);
     }
 };
 }

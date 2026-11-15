@@ -8,10 +8,12 @@
 namespace GakuActors {
 using Json = nlohmann::json;
 struct Character { std::string id, name; bool special{}; };
-struct Part { std::string id, name, character, resource; bool head{}; };
+struct Part { std::string id, name, character, resource; bool head{}; std::string thumbnail,faceResource; };
 struct ModelAssets {std::string character,body,face,hair,factory;};
 struct ModelChoice {std::string label,body,face,hair;};
 struct ModelResource {std::string character,kind,resource,source,bundle;};
+struct PreLiveCostume {std::string character,body,head;bool operator==(const PreLiveCostume&)const=default;};
+struct PreLiveObservation {bool found{};int scene{};std::string character,body,head,status;std::vector<PreLiveCostume> costumes;};
 struct Preset {
     std::string id, name, character, body, head, factory;
     std::string bodyAsset, faceAsset, hairAsset;
@@ -27,11 +29,27 @@ struct Catalog {
     std::string notice{"等待游戏目录读取"};
     std::string resourceNotice;
 };
+inline std::string PreLiveEffectiveCharacter(const std::string& detected,const std::string& manual) {
+    return manual.empty()?detected:manual;
+}
+inline std::vector<Character> PreLiveCharacterChoices(const Catalog& catalog,const std::vector<Preset>& presets) {
+    auto choices=catalog.characters;
+    for(const auto& preset:presets)if(!preset.character.empty()&&std::none_of(choices.begin(),choices.end(),[&](const auto& c){return c.id==preset.character;}))choices.push_back({preset.character,preset.character,false});
+    return choices;
+}
 struct SceneActor {
     int instance{}, scene{};
     std::string name, preset;
     bool owned{};
     float position[3]{}, rotation[4]{0,0,0,1};
+    std::string bodyAsset, faceAsset, hairAsset;
+    int actorIndex{};std::string uniqueId;bool identityValid{},modelRestorable{};
+};
+enum class SceneResourceKind { ActorModel, Prop, Background, Lighting, SceneNode };
+struct SceneResource {
+    SceneResourceKind kind{}; int instance{}, owner{}, scene{};
+    uint64_t generation{}; std::string name; bool hidden{};
+    int parent{},depth{};bool locked{},active{true};
 };
 inline const Character* FindCharacter(const Catalog& c, const std::string& id) {
     for (const auto& item:c.characters) if(item.id==id)return &item;
@@ -40,6 +58,22 @@ inline const Character* FindCharacter(const Catalog& c, const std::string& id) {
 inline const Part* FindPart(const std::vector<Part>& parts,const std::string& id) {
     for(const auto& item:parts)if(item.id==id)return &item;
     return nullptr;
+}
+inline std::string PreLiveCharacterFromCostume(const Catalog& c,const PreLiveCostume& slot) {
+    if(!slot.character.empty())return slot.character;
+    if(slot.body.empty()||slot.head.empty())return {};
+    std::string character;
+    for(const auto* parts:{&c.bodies,&c.heads}) {
+        const auto& id=parts==&c.bodies?slot.body:slot.head;
+        bool matched=false;
+        for(const auto& part:*parts)if(part.id==id&&!part.character.empty()) {
+            matched=true;
+            if(!character.empty()&&character!=part.character)return {};
+            character=part.character;
+        }
+        if(!matched)return {};
+    }
+    return character;
 }
 inline std::vector<ModelChoice> ModelChoices(const Catalog& catalog,const std::string& category,bool heads,bool showAll) {
     std::vector<ModelChoice> choices;

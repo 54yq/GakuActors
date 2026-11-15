@@ -1,0 +1,141 @@
+diff --git a/src/GakuMotion.hpp b/src/GakuMotion.hpp
+index 38e78bc..bc76ac1 100644
+--- a/src/GakuMotion.hpp
++++ b/src/GakuMotion.hpp
+@@ -17,6 +17,7 @@
+ #include "GkCaptureSafety.hpp"
+ #include "GkStageLoadSettings.hpp"
+ #include "GkDataLayout.hpp"
++#include "GkVisualHandoff.hpp"
+ 
+ #include <cstdarg>
+ #include <cstdio>
+@@ -250,7 +251,7 @@ namespace GakuMotion
+ 			}
+ 			// Preview and paused states retain their exact time and do not start audio.
+ 			NotifyMotionPlaying(player.state == PlaybackState::Playing);
+-			const bool resumeStage = capturePerformanceWasActive && !stageStoppedByTransport &&
++			const bool resumeStage = !visual_handoff::Requested() && capturePerformanceWasActive && !stageStoppedByTransport &&
+ 				stageManager.HasCustomizations();
+ 			const bool stageEnabled = resumeStage && stageManager.SetInjectionEnabled(true);
+ 			captureResumeReason = player.state != PlaybackState::Stopped ? "same_session_restored" :
+@@ -724,6 +725,13 @@ namespace GakuMotion
+ 			}
+ 			for (const auto& cmd : commands)
+ 			{
++                if(visual_handoff::Requested() && (cmd.action==GuiAction::SetMicrophoneHidden ||
++                    cmd.action==GuiAction::SetActorModelHidden || cmd.action==GuiAction::SetActorPropHidden ||
++                    cmd.action==GuiAction::StageSettings || cmd.action==GuiAction::StagePreset ||
++                    cmd.action==GuiAction::ToggleStageCandidate || cmd.action==GuiAction::MountCustomStage ||
++                    cmd.action==GuiAction::UnloadCustomStage || cmd.action==GuiAction::RestoreCameraSkybox)) {
++                    ensembleNotice="资源控制已交给 GakuActors；请先在 GakuActors 中释放";continue;
++                }
+ 				// This command stores a future Photography-load preference only.
+ 				// It never touches Unity, playback or the current background.
+ 				if (cmd.action == GuiAction::StageLoadReplacement)
+diff --git a/src/GakuMotionPlugin.cpp b/src/GakuMotionPlugin.cpp
+index 673018c..a8f8827 100644
+--- a/src/GakuMotionPlugin.cpp
++++ b/src/GakuMotionPlugin.cpp
+@@ -2966,7 +2966,7 @@ void MotionActorTick(void*, void* activeActor, float deltaTime)
+ 	}
+ 	if (core.liveObservation.confirmed && activeActor)
+ 	{
+-		LiveActorProps::Tick(core,activeActor,sceneHandle);
++		if(!GakuMotion::visual_handoff::Requested())LiveActorProps::Tick(core,activeActor,sceneHandle);
+ 		if (core.liveViewingConfirmed && g_sceneOwner.Valid() && sceneHandle == g_sceneOwner.sceneHandle &&
+ 			core.sceneActorRegistry.Find(activeActor)) {
+ 			static std::array<void*, 3> sampledActors{};
+@@ -3098,8 +3098,22 @@ void MotionActorTick(void*, void* activeActor, float deltaTime)
+ 	// Without Unity's frame counter, the first callbacks can precede the 2ms
+ 	// fallback boundary. They still share a nonzero camera deduplication ID.
+ 	if (s_cameraPhysicalFrame == 0) s_cameraPhysicalFrame = 1;
+-    if (core.InjectionAllowed() && core.injectionPolicy.Read().captureDepth==0)
++    if (core.InjectionAllowed() && core.injectionPolicy.Read().captureDepth==0 && !GakuMotion::visual_handoff::Requested())
+         ActorModelVisibility::Tick(core,activeActor);
++    static auto nextVisualHandoffAttempt=std::chrono::steady_clock::time_point{};
++    const auto visualHandoffNow=std::chrono::steady_clock::now();
++    if (GakuMotion::visual_handoff::Requested() && !GakuMotion::visual_handoff::IsReleased() && visualHandoffNow>=nextVisualHandoffAttempt) {
++        nextVisualHandoffAttempt=visualHandoffNow+std::chrono::milliseconds(500);
++        const bool props=LiveActorProps::RestoreAll(core);
++        const bool models=ActorModelVisibility::RestoreAll(core);
++        const bool stage=core.stageManager.SetInjectionEnabled(false);
++        StageLoadOverride::Shutdown();
++        const bool hookReleased=StageLoadOverride::target==nullptr;
++        if(props)core.actorPropHidden.clear();
++        if(props&&models&&stage&&hookReleased)GakuMotion::visual_handoff::released.store(true,std::memory_order_release);
++    } else if (!GakuMotion::visual_handoff::Requested() && !StageLoadOverride::attempted) {
++        StageLoadOverride::Install();
++    }
+ 	// Fresh typed snapshots remove disabled/destroyed actors even when no actor
+ 	// callback remains. Never retain an accumulating list of seen scene actors.
+ 	RefreshSceneActors(core, sceneChanged);
+@@ -3404,10 +3418,10 @@ void MotionActorTick(void*, void* activeActor, float deltaTime)
+ 	if (player.state != GakuMotion::PlaybackState::Stopped)
+ 		DispatchFollowerPhysics(core, activeActor, unityFrame >= 0 ? unityFrame : s_fallbackFrame);
+ 	NativeAudio::Sync();
+-	if (isNewPhysicalFrame)
++	if (isNewPhysicalFrame && !GakuMotion::visual_handoff::IsReleased())
+ 	{
+ 		void* mainCam = HelperCameraGetMain();
+-		const bool applyStage = core.InjectionAllowed() && !core.stageStoppedByTransport &&
++		const bool applyStage = !GakuMotion::visual_handoff::Requested() && core.InjectionAllowed() && !core.stageStoppedByTransport &&
+ 			core.stageManager.HasCustomizations() && core.PrepareInjection();
+ 		core.stageManager.SetInjectionEnabled(applyStage, mainCam);
+ 		core.stageManager.OnLateUpdate(activeActor, dtToPass, g_currentSceneName, mainCam);
+@@ -3739,6 +3753,7 @@ void ShowGuiHotkey(void*)
+ 
+ void MotionShutdown(void*)
+ {
++    GakuMotion::visual_handoff::Request(0);
+ 	std::lock_guard<std::mutex> lifecycleLock(g_lifecycleMutex);
+ 	if (!g_pluginInitialized) return;
+ 	g_runtimeReady.store(false, std::memory_order_release);
+diff --git a/src/GkGmlClient.hpp b/src/GkGmlClient.hpp
+index a2a8b0c..076990b 100644
+--- a/src/GkGmlClient.hpp
++++ b/src/GkGmlClient.hpp
+@@ -3,6 +3,7 @@
+ #include "GakuFileDrop.h"
+ #include "GakuPaths.hpp"
+ #include "GakuMotionServices.h"
++#include "GkVisualHandoff.hpp"
+ #include <cstdarg>
+ #include <cstdio>
+ #include <cstring>
+@@ -114,7 +115,13 @@ inline void Error(const char* format, ...) {
+ }
+ inline GakuStatus PublishPlayback() {
+     const PlaybackService service{1u, sizeof(PlaybackService), IsPlaying};
+-    return api.registerService(api.hostContext, GAKUMOTION_SERVICE_PLAYBACK_STATE, sizeof(service), &service);
++    const auto status=api.registerService(api.hostContext, GAKUMOTION_SERVICE_PLAYBACK_STATE, sizeof(service), &service);
++    if(status!=GAKU_OK)return status;
++    struct VisualService {uint32_t abiVersion,structSize;uint32_t(*request)(uint32_t);uint32_t(*isReleased)();};
++    const VisualService visuals{1u,sizeof(VisualService),visual_handoff::Request,visual_handoff::IsReleased};
++    const auto visualStatus=api.registerService(api.hostContext,"gakumotion.visual-handoff",sizeof(visuals),&visuals);
++    if(visualStatus!=GAKU_OK)Warn("[GakuMotion] Visual handoff service unavailable: %d",visualStatus);
++    return GAKU_OK;
+ }
+ // A host without the hotkey service reports GAKU_E_UNAVAILABLE instead of
+ // failing activation; callers only log the miss.
+diff --git a/src/GkVisualHandoff.hpp b/src/GkVisualHandoff.hpp
+new file mode 100644
+index 0000000..3d304a7
+--- /dev/null
++++ b/src/GkVisualHandoff.hpp
+@@ -0,0 +1,15 @@
++#pragma once
++#include <atomic>
++#include <cstdint>
++namespace GakuMotion::visual_handoff {
++inline std::atomic_bool requested{false};
++inline std::atomic_bool released{false};
++inline uint32_t Request(uint32_t value) {
++    const bool next=value!=0;
++    const bool previous=requested.exchange(next,std::memory_order_acq_rel);
++    if(previous!=next)released.store(false,std::memory_order_release);
++    return 1;
++}
++inline uint32_t IsReleased() {return requested.load(std::memory_order_acquire)&&released.load(std::memory_order_acquire)?1u:0u;}
++inline bool Requested(){return requested.load(std::memory_order_acquire);}
++}

@@ -2,6 +2,7 @@
 #include "Catalog.hpp"
 #include "ModelReadiness.hpp"
 #include "ActorOwnership.hpp"
+#include "ActorModelAssets.hpp"
 #include "ResourceCatalog.hpp"
 #include <windows.h>
 #include <chrono>
@@ -9,6 +10,7 @@
 #include <stdexcept>
 #include <cctype>
 #include <cmath>
+#include <unordered_map>
 
 namespace GakuActors {
 // IL2CPP calls are restricted to the loader's Unity-thread callbacks. No game
@@ -26,8 +28,10 @@ class NativeApi {
     bool (*isEnum_)(void*){};
     bool (*assignable_)(void*,void*){};
     void* (*objectNew_)(void*){};
+    void* (*valueBox_)(void*,void*){};
     const char* (*className_)(void*){};
     const char* (*classNamespace_)(void*){};
+    void* (*nestedTypes_)(void*,void**){};
     const void* (*methods_)(void*,void**){};
     const char* (*methodName_)(const void*){};
     uint32_t (*methodCount_)(const void*){};
@@ -55,6 +59,7 @@ class NativeApi {
     const void* (*fields_)(void*,void**){};
     const char* (*fieldName_)(const void*){};
     void* (*fieldType_)(const void*){};
+    uint32_t (*fieldFlags_)(const void*){};
     void* (*fieldValue_)(const void*,void*){};
     bool creationEnabled_{},faulted_{};
     struct ResourceScan {
@@ -64,6 +69,8 @@ class NativeApi {
         std::vector<std::string> samples;
     } resourceScan_;
     std::vector<ActorLease> owned_;
+    struct PoseBaseline {int instance{},scene{},index{};std::string unique;float position[3]{};};
+    std::vector<PoseBaseline> poseBaselines_;
     struct Pending {
         bool active{},cancelled{};
         void* task{},*awaiter{},*cancellation{},*resultClass{};
@@ -73,8 +80,31 @@ class NativeApi {
         float position[3]{},rotation[4]{0,0,0,1};
         std::chrono::steady_clock::time_point started;
     } pending_;
+    struct ModelEdit {
+        bool active{},restoring{},cancelled{};
+        int manager{};ActorIdentity identity;
+        void* original{},*task{},*awaiter{},*cancellation{},*resultClass{};
+        std::array<std::string,3> requested{};
+        std::vector<ActorIdentity> baseline;
+        std::chrono::steady_clock::time_point started;
+    } modelEdit_;
     std::vector<void*> frameRoots_;
+    struct PreLivePending {void* list{},*original{},*replacement{},*fixed{},*task{};bool active{};} preLivePending_;
     int admittedScene_{};
+    struct ResourceLease {
+        void* handle{};void* ownerHandle{};int instance{},owner{},scene{};
+        uint64_t generation{};SceneResourceKind kind{};bool original{},written{};
+        std::string property,root,prop;void* actorHandle{};
+    };
+    std::vector<ResourceLease> resourceLeases_;
+    struct ResourceCandidate { SceneResource item;void* handle{};void* actorHandle{};std::string root,prop; };
+    std::vector<ResourceCandidate> resourceCandidates_;
+    uint64_t resourceGeneration_{1};
+    struct CameraLease {
+        void* handle{};int scene{},instance{},originalFlags{},writtenFlags{};
+        float originalColor[4]{},writtenColor[4]{};
+        bool flagsWritten{},colorWritten{};
+    } cameraLease_;
     const void* activeSceneMethod_{};
     template<class T> bool Export(T& fn,const char* name){fn=reinterpret_cast<T>(GetProcAddress(module_,name));return fn!=nullptr;}
 public:
@@ -88,7 +118,7 @@ public:
         void* Get()const{return handle?api->handleTarget_(handle):nullptr;}
     };
     bool MutationsEnabled()const{return creationEnabled_&&!faulted_;}
-    bool Busy()const{return pending_.active;}
+    bool Busy()const{return pending_.active||modelEdit_.active;}
     bool Faulted()const{return faulted_;}
     bool EnableCreation(bool enabled) {
         if(enabled&&faulted_)return false;
@@ -129,8 +159,21 @@ public:
         Export(typeName_,"il2cpp_type_get_name");Export(il2cppFree_,"il2cpp_free");
         Export(fields_,"il2cpp_class_get_fields");Export(fieldName_,"il2cpp_field_get_name");
         Export(fieldType_,"il2cpp_field_get_type");
+        Export(fieldFlags_,"il2cpp_field_get_flags");
         Export(fieldValue_,"il2cpp_field_get_value_object");
+        Export(valueBox_,"il2cpp_value_box");
+        Export(nestedTypes_,"il2cpp_class_get_nested_types");
         return ok;
+    }
+    void* NewManagedString(const char* value){return stringNew_?stringNew_(value):nullptr;}
+    const void* PhotoBackgroundMethod() {
+        if(!nestedTypes_)return nullptr;
+        void* rules=Class("Campus.Common.AssetNames","ABRule"),*photo=nullptr,*it=nullptr;if(!rules)return nullptr;
+        while(void* candidate=nestedTypes_(rules,&it))if(std::strcmp(className_(candidate),"PhotoBackground")==0){if(photo)return nullptr;photo=candidate;}
+        void* time=Class("Campus.Common.Proto.Client.Enums","PhotoBackgroundTimeType");uint32_t align{};
+        if(!photo||!time||!isEnum_(time)||valueSize_(time,&align)!=4||align!=alignof(int))return nullptr;
+        const auto m=Method(photo,"GetEnvAssetId",2,true,{0x0e,0x11});
+        return m&&typeCode_(result_(m))==0x0e&&fromType_(param_(m,1))==time?m:nullptr;
     }
     void* Class(const char* ns,const char* name) {
         size_t count{};const auto items=assemblies_(domainGet_(),&count);
@@ -189,11 +232,27 @@ public:
         const auto utility=Class("Campus.Common","CampusActorUtility");
         const auto manager=Class("Campus.Common","CampusActorManager");
         const auto actor=Class("Campus.Common","CampusActorController");
+        const auto livePlayer=Class("Campus.Live","LivePlayerPresenter");
+        const auto live3d=Class("Campus.Live","Live3DPresenter");
+        const auto liveBinder=Class("Campus.Common.Live","CampusLiveBinder");
+        const auto confirmModel=Class("Campus.OutGame","PictureBookLivePlayConfirmSheetModel");
+        const auto confirmPresenter=Class("Campus.OutGame","PictureBookLivePlayConfirmSheetPresenter");
+        const auto costumePresenter=Class("Campus.OutGame","PictureBookLiveCostumeSelectSheetPresenter");
+        const auto selectPresenter=Class("Campus.OutGame","PictureBookLiveSelectScreenPresenter");
+        const auto fixedData=Class("Campus.Live.Data","LiveFixedData");
         struct Target {void* klass;const char* label;std::vector<const char*> names;};
         for(const auto& target:std::vector<Target>{
             {utility,"CampusActorUtility",{"UpdateCacheActorAsync","CreateActorDescriptor"}},
             {manager,"CampusActorManager",{"CreateActor","UpdateActorAsync","SafeUpdateActorAsync","UpdateCacheActorAsync","GetFreeActorIndex","ContainsActor","GetActor","GetActorList","TryDestroyActor","DestroyActor"}},
-            {actor,"CampusActorController",{"BuildAsync","get_descriptor","get_settings","get_index","GetModelPartsList","GetBuildResources","get_IsBuildSuccess"}}}) {
+            {actor,"CampusActorController",{"BuildAsync","get_descriptor","get_settings","get_index","GetModelPartsList","GetBuildResources","get_IsBuildSuccess"}},
+            {livePlayer,"LivePlayerPresenter",{"get_ThreeDLive","get_Actors","PreloadAssetsAsync","LoadCharacterAsync","Initialize3DActorsAsync","CreateDescriptors","CreateActorAsync"}},
+            {live3d,"Live3DPresenter",{"SetActorsAsync","SetupLiveBinderAsync","SetActorsActive","ResetActorModel"}},
+            {liveBinder,"CampusLiveBinder",{"get_Actors","get_VirtualActors","BindActor","SetupAsync"}},
+            {confirmModel,"LiveConfirmModel",{"get_Costumes","set_Costumes"}},
+            {confirmPresenter,"LiveConfirmPresenter",{"UpdateCostumes","OnClickChangeButton"}},
+            {costumePresenter,"LiveCostumePresenter",{"SetData","OnClickHead","OnClickBody"}},
+            {selectPresenter,"LiveSelectPresenter",{"OpenPlayConfirmSheetAsync","OpenCostumeChangeSheetAsync","MoveLiveScene"}},
+            {fixedData,"LiveFixedData",{".ctor","get_Descriptors","GetOriginalActorDescriptors","GetAdditionalActorDescriptors"}}}) {
             size_t depth=0,total=0;
             for(void* c=target.klass;c&&depth++<24;c=parent_(c)) {
                 void* it=nullptr;
@@ -206,6 +265,7 @@ public:
                 }
             }
         }
+        for(void* klass:{livePlayer,live3d,liveBinder,confirmModel,fixedData})if(klass)TraceTypeShape(klass);
         Trace("Diagnostic contracts END");return true;
     }
     // Most-derived declaration wins; ambiguous overloads fail closed. Exact
@@ -310,7 +370,7 @@ public:
         Pin scene(*this,Call(On(go,"get_scene"),go));
         ActorScene out;out.handle=SceneOf(go);out.owner=Text(scene.Get(),"get_name");out.active=ActiveSceneName();return out;
     }
-    void SetAdmittedScene(int scene){admittedScene_=scene;}
+    void SetAdmittedScene(int scene){if(scene!=admittedScene_){poseBaselines_.clear();if(modelEdit_.original&&!modelEdit_.active)DropModelEdit();}admittedScene_=scene;}
     int PerformanceScene()const{return admittedScene_;}
     void Pose(void* actor,float* position,float* rotation) {
         void* transform=Call(On(actor,"get_transform"),actor);
@@ -328,7 +388,21 @@ public:
             const int actorScene=SceneOf(go);if(scene&&actorScene!=scene)continue;
             SceneActor entry;entry.instance=Int(actor,"GetInstanceID");entry.scene=actorScene;entry.name=Text(go,"get_name");
             if(scene)Pose(actor,entry.position,entry.rotation);
+            try {const auto identity=Identify(actor);entry.actorIndex=identity.index;entry.uniqueId=identity.unique;
+                entry.identityValid=identity.instance==entry.instance&&identity.scene==entry.scene&&!identity.unique.empty();}
+            catch(const std::exception&) {entry.identityValid=false;}
+            // A missing descriptor or optional getter must not hide the actor
+            // or stop the rest of the roster from being observed.
+            try {
+                Pin descriptor(*this,Call(On(actor,"get_descriptor"),actor));
+                if(descriptor.Get()) {
+                    entry.bodyAsset=Text(descriptor.Get(),"get_body");
+                    entry.faceAsset=Text(descriptor.Get(),"get_face");
+                    entry.hairAsset=Text(descriptor.Get(),"get_hair");
+                }
+            } catch(const std::exception&) { entry.bodyAsset.clear();entry.faceAsset.clear();entry.hairAsset.clear(); }
             for(const auto& lease:owned_)if(lease.ready&&lease.identity.instance==entry.instance&&lease.identity.scene==entry.scene&&LeaseMatches(lease,Identify(actor))){entry.owned=true;entry.preset=lease.preset;}
+            entry.modelRestorable=modelEdit_.original&&modelEdit_.identity.instance==entry.instance&&modelEdit_.identity.scene==entry.scene&&modelEdit_.identity.unique==entry.uniqueId;
             result.push_back(std::move(entry));
         }
         // Observation never reconciles or releases game cache entries.
@@ -357,20 +431,25 @@ public:
         if(!props.Get()||!assignable_(fromType_(param_(m,0)),objectClass_(props.Get())))throw std::runtime_error("特殊人物配件参数类型不匹配");
         void* args[]{props.Get()};return Call(m,nullptr,args);
     }
-    Catalog ScanCatalog() {
-        Catalog out;void* master=Class("Campus.Common.Master","MasterManager");
-        auto load=[&](const char* getter){return Call(Method(master,getter,0,true));};
+    std::vector<Character> ScanCharacters() {
+        std::vector<Character> out;void* master=Class("Campus.Common.Master","MasterManager");
         Trace("Catalog phase: CharacterMaster getter BEGIN");
-        Pin chars(*this,load("get_CharacterMaster"));int ascending=0;void* sort[]{&ascending};
+        Pin chars(*this,Call(Method(master,"get_CharacterMaster",0,true)));int ascending=0;void* sort[]{&ascending};
         Trace("Catalog phase: CharacterMaster getter END; sorted list BEGIN");
         Pin characters(*this,Call(Sorted(chars.Get()),chars.Get(),sort));
         Trace("Catalog phase: CharacterMaster sorted list END; enumerate BEGIN");
         for(void* c:Items(characters.Get())) {
             const auto id=Text(c,"get_Id");if(!TextValid(id,128))continue;
             auto name=Text(c,"get_Name");if(name.empty())name=id;
-            out.characters.push_back({id,name,false});
+            out.push_back({id,name,false});
         }
         Trace("Catalog phase: CharacterMaster enumerate END");
+        return out;
+    }
+    Catalog ScanCatalog() {
+        Catalog out;void* master=Class("Campus.Common.Master","MasterManager");
+        auto load=[&](const char* getter){return Call(Method(master,getter,0,true));};
+        out.characters=ScanCharacters();int ascending=0;void* sort[]{&ascending};
         for(bool head:{false,true}) {
             Trace(head?"Catalog phase: CostumeHeadMaster BEGIN":"Catalog phase: CostumeMaster BEGIN");
             Pin manager(*this,load(head?"get_CostumeHeadMaster":"get_CostumeMaster"));
@@ -379,6 +458,12 @@ public:
             for(void* row:Items(rows.Get())) {
                 Part item;item.id=Text(row,"get_Id");item.name=Text(row,"get_Name");item.character=Identity(row);item.head=head;
                 item.resource=Text(row,head?"get_HairAssetId":"get_AssetId");
+                if(head)item.faceResource=Text(row,"get_FaceAssetId");
+                try {
+                    const auto thumb=On(row,"GetThumbAssetName");
+                    if(thumb&&typeCode_(result_(thumb))==0x0e)item.thumbnail=String(Call(thumb,row));
+                    if(!item.thumbnail.empty()&&!TextValid(item.thumbnail,256))item.thumbnail.clear();
+                }catch(const std::exception&){} // Optional metadata must not reject the catalog.
                 if(item.name.empty())item.name=item.id;if(item.id.empty()||item.character.empty())continue;
                 (head?out.heads:out.bodies).push_back(item);
                 if(!head) {
@@ -444,6 +529,38 @@ public:
         Pin body(*this,stringNew_(p.body.c_str())),head(*this,stringNew_(p.head.c_str()));
         void* args[]{body.Get(),head.Get()};return Call(method,nullptr,args);
     }
+    // Prepare an independent shallow descriptor copy with a separate asset
+    // list. This does not update a game actor. Other reference-valued fields
+    // remain shared and must be audited before calling any mutation API.
+    void* PrepareModelDescriptor(void* original,const std::array<std::string,3>& requested) {
+        if(!original)throw std::runtime_error("人物描述为空");
+        const std::array<std::string,3> before{Text(original,"get_body"),Text(original,"get_face"),Text(original,"get_hair")};
+        const auto getAssets=On(original,"get_assets");
+        Pin assets(*this,Call(getAssets,original));
+        if(!assets.Get())throw std::runtime_error("人物资源列表为空");
+        const int n=Int(assets.Get(),"get_Count");if(n<0||n>128)throw std::runtime_error("人物资源列表长度异常");
+        const auto get=Method(objectClass_(assets.Get()),"get_Item",1,false,{8});
+        if(!get||typeCode_(result_(get))!=0x0e)throw std::runtime_error("人物资源列表元素类型不匹配");
+        std::vector<std::string> input,output;
+        for(int i=0;i<n;++i){void* args[]{&i};const auto value=String(Call(get,assets.Get(),args));if(value.empty())throw std::runtime_error("人物资源列表包含空值");input.push_back(value);}
+        if(!ReplaceActorModelAssets(input,before,requested,output))throw std::runtime_error("无法唯一识别身体、脸和头发资源位置");
+        const auto clone=On(original,"MemberwiseClone");
+        Pin copy(*this,Call(clone,original));
+        if(!copy.Get()||copy.Get()==original||objectClass_(copy.Get())!=objectClass_(original))throw std::runtime_error("人物描述复制失败");
+        Pin list(*this,objectNew_(objectClass_(assets.Get())));
+        if(!list.Get())throw std::runtime_error("资源列表分配失败");
+        const auto ctor=On(list.Get(),".ctor");const auto add=Method(objectClass_(list.Get()),"Add",1,false,{0x0e});
+        if(!ctor||!add)throw std::runtime_error("资源列表构造接口不匹配");
+        Call(ctor,list.Get());
+        for(const auto& value:output){Pin item(*this,stringNew_(value.c_str()));if(!item.Get())throw std::runtime_error("资源名称分配失败");void* args[]{item.Get()};Call(add,list.Get(),args);}
+        const auto set=On(copy.Get(),"set_assets",1);
+        if(!set||!assignable_(fromType_(param_(set,0)),objectClass_(list.Get())))throw std::runtime_error("资源列表设置接口不匹配");
+        void* args[]{list.Get()};Call(set,copy.Get(),args);
+        if(Text(copy.Get(),"get_body")!=requested[0]||Text(copy.Get(),"get_face")!=requested[1]||Text(copy.Get(),"get_hair")!=requested[2]||
+           Text(original,"get_body")!=before[0]||Text(original,"get_face")!=before[1]||Text(original,"get_hair")!=before[2])
+            throw std::runtime_error("描述副本资源校验失败");
+        return copy.Get();
+    }
     ModelAssets ResolveModelAssets(const Preset& preset) {
         Pin descriptor(*this,Descriptor(preset));
         if(!descriptor.Get())throw std::runtime_error("模型描述为空");
@@ -466,12 +583,46 @@ public:
         return model;
     }
     #include "NativeSpawn.inl"
+    #include "NativeModelEdit.inl"
+    #include "NativeLiveBindingDiagnostics.inl"
+    #include "NativePreLiveDiagnostics.inl"
+    #include "NativeResources.inl"
+    #include "NativeCamera.inl"
+    #include "NativeThumbnail.inl"
     #include "NativeResourceIndex.inl"
+    bool DiagnoseActorManagerRelations() {
+        const int scene=PerformanceScene();if(!scene)return false;
+        Trace("Diagnostic manager relationships BEGIN (read only; no update or bind)");
+        void* manager=nullptr;
+        try{manager=Manager();}catch(const std::exception& e){Trace((std::string("Diagnostic manager unavailable: ")+e.what()).c_str());}
+        if(!manager){Trace("Diagnostic manager relationships: no unique active manager");return false;}
+        const int managerId=Int(manager,"GetInstanceID");size_t count=0;
+        for(void* actor:Objects(Class("Campus.Common","CampusActorController"))) {
+            try {
+                if(SceneOf(GameObject(actor))!=scene)continue;
+                if(++count>64){Trace("Diagnostic manager relationships: truncated at 64");break;}
+                const auto observed=Identify(actor);
+                void* mapped=AtIndex(manager,observed.index);
+                if(!mapped){Trace(("Diagnostic manager mapping: manager="+std::to_string(managerId)+" observed="+std::to_string(observed.instance)+" index="+std::to_string(observed.index)+" mapped=none").c_str());continue;}
+                const auto registered=Identify(mapped);
+                Trace(("Diagnostic manager mapping: manager="+std::to_string(managerId)+" observed="+std::to_string(observed.instance)+" index="+std::to_string(observed.index)+" scene="+std::to_string(observed.scene)+" unique="+observed.unique+" mapped="+std::to_string(registered.instance)+" mapped_scene="+std::to_string(registered.scene)+" mapped_unique="+registered.unique+" same="+std::to_string(registered.instance==observed.instance)+" active="+std::to_string(observed.active)+" build="+std::to_string(observed.build)+" rendered="+std::to_string(observed.rendered)).c_str());
+            }catch(const std::exception& e){Trace((std::string("Diagnostic manager mapping unavailable: ")+e.what()).c_str());}
+        }
+        Trace("Diagnostic manager relationships END");return true;
+    }
     bool DiagnoseActors() {
         const int scene=PerformanceScene();if(!scene)return false;
         Trace(("Diagnostic actors BEGIN: owner_scene="+std::to_string(scene)+" (read only; no humanoid bone lookup)").c_str());
         size_t count=0;std::vector<void*> shapes;
-        for(void* actor:Objects(Class("Campus.Common","CampusActorController"))) {
+        const auto actors=Objects(Class("Campus.Common","CampusActorController"));
+        std::vector<std::pair<int,std::array<std::string,3>>> choices;
+        for(void* candidate:actors)try {
+            if(SceneOf(GameObject(candidate))!=scene)continue;
+            Pin descriptor(*this,Call(On(candidate,"get_descriptor"),candidate));
+            std::array<std::string,3> parts{Text(descriptor.Get(),"get_body"),Text(descriptor.Get(),"get_face"),Text(descriptor.Get(),"get_hair")};
+            if(!parts[0].empty()&&!parts[1].empty()&&!parts[2].empty())choices.push_back({Int(candidate,"GetInstanceID"),std::move(parts)});
+        }catch(const std::exception&){}
+        for(void* actor:actors) {
             int instance=0;
             try {
                 void* go=GameObject(actor);if(SceneOf(go)!=scene)continue;
@@ -481,6 +632,40 @@ public:
                 try {
                     Pin descriptor(*this,Call(On(actor,"get_descriptor"),actor));
                     Trace(("Diagnostic actor resources: instance="+std::to_string(instance)+" unique="+Text(descriptor.Get(),"get_uniqueId")+" body="+Text(descriptor.Get(),"get_body")+" face="+Text(descriptor.Get(),"get_face")+" hair="+Text(descriptor.Get(),"get_hair")).c_str());
+                    try {
+                        const std::array<std::string,3> same{Text(descriptor.Get(),"get_body"),Text(descriptor.Get(),"get_face"),Text(descriptor.Get(),"get_hair")};
+                        Pin copy(*this,PrepareModelDescriptor(descriptor.Get(),same));
+                        Trace(("Diagnostic descriptor copy: instance="+std::to_string(instance)+(copy.Get()?" verified":" unavailable")).c_str());
+                        const auto other=std::find_if(choices.begin(),choices.end(),[&](const auto& x){return x.first!=instance&&x.second!=same;});
+                        if(other!=choices.end()) {
+                            Pin swapped(*this,PrepareModelDescriptor(descriptor.Get(),other->second));
+                            Trace(("Diagnostic descriptor cross-copy: instance="+std::to_string(instance)+" source="+std::to_string(other->first)+(swapped.Get()?" verified":" unavailable")).c_str());
+                        }
+                    }catch(const std::exception& e){Trace(("Diagnostic descriptor copy unavailable: instance="+std::to_string(instance)+" reason="+e.what()).c_str());}
+                    try {
+                        Pin assets(*this,Call(On(descriptor.Get(),"get_assets"),descriptor.Get()));
+                        if(assets.Get()) {
+                            const auto assetCount=Int(assets.Get(),"get_Count");
+                            if(assetCount<0||assetCount>128)throw std::runtime_error("资源列表长度异常");
+                            const auto item=Method(objectClass_(assets.Get()),"get_Item",1,false,{8});
+                            if(!item||typeCode_(result_(item))!=0x0e)throw std::runtime_error("资源列表的元素类型不是字符串");
+                            for(int i=0;i<assetCount;++i){void* args[]{&i};Trace(("Diagnostic descriptor asset: instance="+std::to_string(instance)+" slot="+std::to_string(i)+" value="+String(Call(item,assets.Get(),args))).c_str());}
+                        } else Trace("Diagnostic descriptor assets: unavailable");
+                    } catch(const std::exception& e){Trace((std::string("Diagnostic descriptor assets unavailable: ")+e.what()).c_str());}
+                    // Capture descriptor metadata without executing additional
+                    // getters: restoring only three model names may discard
+                    // other character properties. Inspect each class once.
+                    for(void* klass=descriptor.Get()?objectClass_(descriptor.Get()):nullptr;klass;klass=parent_(klass)) {
+                        if(std::find(shapes.begin(),shapes.end(),klass)!=shapes.end())break;
+                        if(shapes.size()>=128)break;
+                        shapes.push_back(klass);TraceTypeShape(klass);
+                        void* it=nullptr;size_t methodCount=0;
+                        while(const void* method=methods_(klass,&it)) {
+                            if(++methodCount>4096)break;
+                            const char* name=methodName_(method);
+                            if(name&&(!std::strncmp(name,"get_",4)||!std::strncmp(name,"set_",4)))TraceSignature("actor descriptor",method);
+                        }
+                    }
                 } catch(const std::exception& e){Trace(("Diagnostic descriptor unavailable: instance="+std::to_string(instance)+" reason="+e.what()).c_str());}
                 try {
                     Pin parts(*this,Call(On(actor,"GetModelPartsList"),actor));
@@ -527,6 +712,7 @@ public:
     }
     void SuspendScene() {
         StopResourceScan();
+        CancelModelEdit();
         creationEnabled_=false;CancelPending();
         for(auto it=owned_.begin();it!=owned_.end();) {
             if(!it->ready){++it;continue;}
@@ -539,7 +725,7 @@ public:
     void Shutdown() {
         // The host may shut down off the Unity thread. Do not invoke Unity or
         // destroy actors here; the process/owning scene handles destruction.
-        creationEnabled_=false;admittedScene_=0;StopResourceScan(false);DropPending(false);owned_.clear();EndFrame();
+        creationEnabled_=false;admittedScene_=0;StopResourceScan(false);DropPending(false);DropModelEdit();ClearPreLivePending();owned_.clear();EndFrame();
     }
 };
 }

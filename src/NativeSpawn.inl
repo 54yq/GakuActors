@@ -210,7 +210,7 @@ bool StartSpawn(const Preset& p,int reference) {
         return false;
     }
 }
-ModelReadiness InspectBuiltModel(void* actor,const ModelAssets& expected) {
+ModelReadiness InspectBuiltModel(void* actor,const ModelAssets& expected,bool verbose=true) {
     ModelReadiness m;m.buildSuccess=Bool(actor,"get_IsBuildSuccess");m.rendererActive=Bool(actor,"IsRendererActive");
     Pin parts(*this,Call(On(actor,"GetModelPartsList"),actor));
     for(void* part:Items(parts.Get())) {
@@ -225,7 +225,7 @@ ModelReadiness InspectBuiltModel(void* actor,const ModelAssets& expected) {
         const bool ready=bones>0&&Bool(part,"get_rendererActive");
         m.bodyPart|=kind=="body"&&asset==expected.body&&ready;m.facePart|=kind=="face"&&asset==expected.face&&ready;m.hairPart|=kind=="hair"&&asset==expected.hair&&ready;
         m.nativeBones+=bones;m.nativeMaterials+=mc;m.nativeRenderers+=rc+(skin.Get()?1:0);
-        Trace(("Spawn native model evidence: asset="+asset+" kind="+kind+" bone_entries="+std::to_string(bones)+" renderers="+std::to_string(rc)+" material_infos="+std::to_string(mc)+" vl_skinning="+std::to_string(skin.Get()!=nullptr)+" ready="+std::to_string(ready)).c_str());
+        if(verbose)Trace(("Spawn native model evidence: asset="+asset+" kind="+kind+" bone_entries="+std::to_string(bones)+" renderers="+std::to_string(rc)+" material_infos="+std::to_string(mc)+" vl_skinning="+std::to_string(skin.Get()!=nullptr)+" ready="+std::to_string(ready)).c_str());
     }
     return m;
 }
@@ -265,7 +265,7 @@ void PollSpawn() {
         }catch(const std::exception& e){Trace((std::string("Spawn actor name unavailable: ")+e.what()).c_str());}
         SetPose(actor.Get(),pending_.position,pending_.rotation);SetActorActive(actor.Get(),true);
         if(!BaselinePreserved(pending_.baseline,CaptureActors()))throw std::runtime_error("激活独立人物后既有角色状态发生变化");
-        for(auto& o:owned_)if(o.identity.instance==current.instance)o.ready=true;
+        for(auto& o:owned_)if(o.identity.instance==current.instance){std::memcpy(o.spawnPosition,pending_.position,sizeof(o.spawnPosition));o.ready=true;}
         Trace(("Spawn isolated READY: instance="+std::to_string(current.instance)+" index="+std::to_string(current.index)+" parts="+std::to_string(evidence.parts)+" native_bone_entries="+std::to_string(evidence.nativeBones)+" existing_actors_preserved=1").c_str());
         notice="独立人物已完成原生构建并显示在参考主角色位置；动作绑定仍需在动作插件中操作";DropPending();
     }catch(const std::exception& e) {
@@ -294,4 +294,72 @@ bool MoveActor(int instance,const float* position) {
     for(size_t i=0;i<3;++i)if(!std::isfinite(position[i])||std::fabs(position[i])>10000)return false;
     void* actor=ResolveLease(*it);if(!actor){Fault("定位时无法确认独立人物的当前身份");return false;}
     float old[3],rotation[4];Pose(actor,old,rotation);SetPose(actor,position,rotation);return true;
+}
+
+bool ResetActorPosition(int instance) {
+    if(!MutationsEnabled())return RejectMutation("reset position");
+    const auto it=std::find_if(owned_.begin(),owned_.end(),[&](const auto& a){return a.ready&&a.identity.instance==instance&&a.identity.scene==PerformanceScene();});
+    if(it==owned_.end())return RejectMutation("unowned reset position");
+    return MoveActor(instance,it->spawnPosition);
+}
+bool TurnActor(int instance,float degrees,bool absolute=false) {
+    if(!MutationsEnabled())return RejectMutation("turn");
+    if(Busy()||!std::isfinite(degrees)||std::fabs(degrees)>360.0f)return false;
+    const auto it=std::find_if(owned_.begin(),owned_.end(),[&](const auto& a){return a.ready&&a.identity.instance==instance&&a.identity.scene==PerformanceScene();});
+    if(it==owned_.end())return RejectMutation("unowned turn");
+    void* actor=ResolveLease(*it);if(!actor){Fault("转向时无法确认独立人物的当前身份");return false;}
+    float position[3],q[4];Pose(actor,position,q);
+    if(absolute)degrees-=std::atan2(2.0f*(q[3]*q[1]+q[0]*q[2]),1.0f-2.0f*(q[1]*q[1]+q[2]*q[2]))*57.29577951308232f;
+    const float half=degrees*0.008726646259971648f,c=std::cos(half),s=std::sin(half);
+    const float turned[4]{c*q[0]+s*q[2],c*q[1]+s*q[3],c*q[2]-s*q[0],c*q[3]-s*q[1]};
+    SetPose(actor,position,turned);notice="人物朝向已调整";return true;
+}
+
+// Position controls for a roster snapshot. A fresh scene/index/unique-id
+// match is required for game-owned actors; owned actors retain lease checks.
+void* ResolveScenePoseActor(const SceneActor& expected) {
+    if(!PerformanceScene()||expected.scene!=PerformanceScene()||!expected.identityValid||expected.uniqueId.empty())return nullptr;
+    void* actor=FindActor(expected.instance,expected.scene);if(!actor)return nullptr;
+    const auto identity=Identify(actor);
+    if(identity.instance!=expected.instance||identity.scene!=expected.scene||identity.index!=expected.actorIndex||identity.unique!=expected.uniqueId||!identity.active)return nullptr;
+    if(expected.owned) {
+        const auto it=std::find_if(owned_.begin(),owned_.end(),[&](const auto& lease){return lease.ready&&lease.identity.instance==expected.instance&&lease.identity.scene==expected.scene;});
+        if(it==owned_.end()||!LeaseMatches(*it,identity)||ResolveLease(*it)!=actor)return nullptr;
+    }
+    return actor;
+}
+bool ReadScenePose(const SceneActor& actor,float* position,float* rotation) {
+    void* object=ResolveScenePoseActor(actor);if(!object)return false;Pose(object,position,rotation);return true;
+}
+bool CaptureScenePoseBaseline(const SceneActor& expected,void* actor) {
+    auto it=std::find_if(poseBaselines_.begin(),poseBaselines_.end(),[&](const auto& b){return b.instance==expected.instance&&b.scene==expected.scene&&b.index==expected.actorIndex&&b.unique==expected.uniqueId;});
+    if(it!=poseBaselines_.end())return true;
+    PoseBaseline baseline;baseline.instance=expected.instance;baseline.scene=expected.scene;baseline.index=expected.actorIndex;baseline.unique=expected.uniqueId;
+    float rotation[4];Pose(actor,baseline.position,rotation);
+    if(expected.owned)for(const auto& lease:owned_)if(lease.ready&&lease.identity.instance==expected.instance&&lease.identity.scene==expected.scene){std::memcpy(baseline.position,lease.spawnPosition,sizeof(baseline.position));break;}
+    poseBaselines_.push_back(std::move(baseline));return true;
+}
+bool MoveSceneActor(const SceneActor& expected,const float* position) {
+    if(Faulted()||Busy()||!position){notice="人物操作繁忙或被锁定";return false;}
+    for(size_t i=0;i<3;++i)if(!std::isfinite(position[i])||std::fabs(position[i])>10000){notice="位置数值无效";return false;}
+    void* actor=ResolveScenePoseActor(expected);if(!actor){notice="人物身份或场景已变化，请重新扫描";return false;}
+    CaptureScenePoseBaseline(expected,actor);float old[3],rotation[4];Pose(actor,old,rotation);SetPose(actor,position,rotation);notice="人物位置已提交";return true;
+}
+bool ResetSceneActor(const SceneActor& expected,float* target=nullptr) {
+    if(Faulted()||Busy()){notice="人物操作繁忙或被锁定";return false;}
+    void* actor=ResolveScenePoseActor(expected);if(!actor){notice="人物身份或场景已变化，请重新扫描";return false;}
+    if(!CaptureScenePoseBaseline(expected,actor))return false;
+    const auto it=std::find_if(poseBaselines_.begin(),poseBaselines_.end(),[&](const auto& b){return b.instance==expected.instance&&b.scene==expected.scene&&b.index==expected.actorIndex&&b.unique==expected.uniqueId;});
+    if(it==poseBaselines_.end())return false;
+    if(target)std::memcpy(target,it->position,sizeof(it->position));
+    float current[3],rotation[4];Pose(actor,current,rotation);SetPose(actor,it->position,rotation);notice="人物位置已重置";return true;
+}
+bool TurnSceneActor(const SceneActor& expected,float degrees,bool absolute) {
+    if(Faulted()||Busy()||!std::isfinite(degrees)||std::fabs(degrees)>360){notice="人物操作繁忙或朝向数值无效";return false;}
+    void* actor=ResolveScenePoseActor(expected);if(!actor){notice="人物身份或场景已变化，请重新扫描";return false;}
+    CaptureScenePoseBaseline(expected,actor);float position[3],q[4];Pose(actor,position,q);
+    if(absolute)degrees-=std::atan2(2.0f*(q[3]*q[1]+q[0]*q[2]),1.0f-2.0f*(q[1]*q[1]+q[2]*q[2]))*57.29577951308232f;
+    const float half=degrees*0.008726646259971648f,c=std::cos(half),s=std::sin(half);
+    const float turned[4]{c*q[0]+s*q[2],c*q[1]+s*q[3],c*q[2]-s*q[0],c*q[3]-s*q[1]};
+    SetPose(actor,position,turned);notice="人物朝向已提交";return true;
 }

@@ -8,7 +8,7 @@ enum class PerformanceMode { None, Photography, Live };
 // name or the mere presence of a loaded model. No game calls live in this policy.
 class SceneGate {
     PerformanceMode mode_{PerformanceMode::None};
-    int scene_{};uint64_t observed_{};
+    int scene_{};uint64_t observed_{};int replacementOwner_{};std::string replacement_;
     static bool PhotoActive(const std::string& n) {
         // Same admitted photography environments as the local MMD baseline.
         return n=="Photography"||n=="env_3d_photo_hotspring-00-00-night"||
@@ -25,16 +25,21 @@ public:
         return PerformanceMode::None;
     }
     bool MatchesActive(const std::string& active)const {
-        return mode_==PerformanceMode::Photography?PhotoActive(active):
+        return mode_==PerformanceMode::Photography?(PhotoActive(active)||(replacementOwner_==scene_&&!replacement_.empty()&&active==replacement_)):
             mode_==PerformanceMode::Live&&(active=="Live"||active.rfind("env_3d_live_",0)==0);
     }
     void Observe(const std::string& owner,int scene,const std::string& active,uint64_t now) {
-        const auto found=Recognize(owner,active);
+        auto found=Recognize(owner,active);
+        if(found==PerformanceMode::None&&owner=="Photography"&&scene==replacementOwner_&&!replacement_.empty()&&active==replacement_)found=PerformanceMode::Photography;
         if(found!=PerformanceMode::None&&scene){mode_=found;scene_=scene;observed_=now;}
         else if(!MatchesActive(active))Reset();
     }
     bool Fresh(uint64_t now)const {return scene_&&mode_!=PerformanceMode::None&&now>=observed_&&now-observed_<=1500;}
-    void Reset(){mode_=PerformanceMode::None;scene_=0;observed_=0;}
+    void Reset(){mode_=PerformanceMode::None;scene_=0;observed_=0;replacementOwner_=0;replacement_.clear();}
+    bool AuthorizeReplacement(int scene,const std::string& target) {
+        if(mode_!=PerformanceMode::Photography||!scene||scene!=scene_||target.empty())return false;
+        replacementOwner_=scene;replacement_=target;return true;
+    }
     int Scene()const{return scene_;}
     PerformanceMode Mode()const{return mode_;}
 };

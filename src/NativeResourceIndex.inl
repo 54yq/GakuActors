@@ -30,8 +30,8 @@ std::pair<std::string,std::string> AssetNamePair(const void* converter,const std
     Pin first(*this,fieldValue_(a,pair.Get())),second(*this,fieldValue_(b,pair.Get()));
     return {String(first.Get()),String(second.Get())};
 }
-bool StartResourceScan(Catalog& catalog) {
-    if(!PerformanceScene())return false;
+bool StartResourceScan(Catalog& catalog,bool preLive=false) {
+    if(!PerformanceScene()&&!preLive)return false;
     StopResourceScan();
     for(const auto& model:catalog.models)AddDescriptorResources(catalog,model);
     try {
@@ -90,9 +90,9 @@ bool StartResourceScan(Catalog& catalog) {
         StopResourceScan();catalog.resourceNotice=std::string("底层资源目录未完成：")+e.what();Trace(catalog.resourceNotice.c_str());return false;
     }
 }
-void StepResourceScan(Catalog& catalog) {
+void StepResourceScan(Catalog& catalog,bool preLive=false) {
     if(!ResourceScanActive())return;
-    if(!PerformanceScene()){StopResourceScan();catalog.resourceNotice="离开支持场景，资源目录扫描已暂停";return;}
+    if(!PerformanceScene()&&!preLive){StopResourceScan();catalog.resourceNotice="离开支持场景，资源目录扫描已暂停";return;}
     try {
         void* iterator=handleTarget_(resourceScan_.iterator);if(!iterator)throw std::runtime_error("资源枚举器已丢失");
         for(size_t step=0;step<512;++step) {

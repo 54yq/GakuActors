@@ -13,6 +13,7 @@ struct ActorLease {
     std::string preset;
     std::vector<int> preexisting;
     bool fresh{},ready{};
+    float spawnPosition[3]{};
 };
 inline bool FreshIdentity(const ActorIdentity& actor,int index,int scene,const std::vector<int>& before) {
     // Unity instance IDs and scene handles can be negative; zero is invalid.
