@@ -69,7 +69,7 @@ class NativeApi {
         std::vector<std::string> samples;
     } resourceScan_;
     std::vector<ActorLease> owned_;
-    struct PoseBaseline {int instance{},scene{},index{};std::string unique;float position[3]{};};
+    struct PoseBaseline {int instance{},scene{},index{};std::string unique;float position[3]{},rotation[4]{};};
     std::vector<PoseBaseline> poseBaselines_;
     struct Pending {
         bool active{},cancelled{};
@@ -446,7 +446,7 @@ public:
         Trace("Catalog phase: CharacterMaster enumerate END");
         return out;
     }
-    Catalog ScanCatalog() {
+    Catalog ScanCatalog(bool includeSpecial=true) {
         Catalog out;void* master=Class("Campus.Common.Master","MasterManager");
         auto load=[&](const char* getter){return Call(Method(master,getter,0,true));};
         out.characters=ScanCharacters();int ascending=0;void* sort[]{&ascending};
@@ -485,7 +485,7 @@ public:
         }
         Trace("Catalog phase: optional special descriptors BEGIN");
         struct Special {const char* factory;const char* label;};
-        for(const auto& entry:std::vector<Special>{{"CreateTeacherDescriptor","老师"},{"CreateTeacherGlassHairDescriptor","老师（眼镜／发型）"},
+        if(includeSpecial)for(const auto& entry:std::vector<Special>{{"CreateTeacherDescriptor","老师"},{"CreateTeacherGlassHairDescriptor","老师（眼镜／发型）"},
             {"CreateVocalTrainerDescriptor","歌唱训练员"},{"CreateDanceTrainerDescriptor","舞蹈训练员"},{"CreateVisualTrainerDescriptor","视觉训练员"}}) {
             try {
                 Pin descriptor(*this,Factory(entry.factory));if(!descriptor.Get())continue;
@@ -585,6 +585,7 @@ public:
     #include "NativeSpawn.inl"
     #include "NativeModelEdit.inl"
     #include "NativeLiveBindingDiagnostics.inl"
+    #include "NativeLiveControl.inl"
     #include "NativePreLiveDiagnostics.inl"
     #include "NativeResources.inl"
     #include "NativeCamera.inl"

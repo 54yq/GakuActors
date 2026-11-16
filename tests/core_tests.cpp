@@ -13,6 +13,7 @@
 #include "DesktopProtocol.hpp"
 #include "DesktopTransport.hpp"
 #include "ActorModelAssets.hpp"
+#include "CatalogStartupRead.hpp"
 
 namespace GakuActors {
 struct StageLoadHookTestAccess {
@@ -31,6 +32,23 @@ struct StageLoadHookTestAccess {
 int main() {
     using namespace GakuActors;
     int checks=0;auto check=[&](bool result,std::source_location loc=std::source_location::current()){++checks;if(!result){std::cerr<<"failed check "<<checks<<" at "<<loc.file_name()<<":"<<loc.line()<<"\n";std::abort();}};
+    CatalogStartupRead startup;
+    check(startup.Pending()&&startup.Attempts()==0);
+    check(!startup.Due(false,false,1000)&&startup.Attempts()==0);
+    check(!startup.Due(true,true,1100));
+    check(!startup.Due(true,false,1200));
+    check(!startup.Due(true,false,1949)&&startup.Due(true,false,1950));
+    startup.Begin(1950);check(startup.Attempts()==1);
+    check(!startup.Due(true,false,3949)&&startup.Due(true,false,3950));
+    startup.Begin(3950);check(!startup.Due(true,false,8949)&&startup.Due(true,false,8950));
+    startup.Begin(8950);check(!startup.Pending()&&!startup.Due(true,false,99999));
+    check(!startup.Due(false,false,100000)&&startup.Attempts()==0&&startup.Pending());
+    check(!startup.Due(true,false,100001)&&startup.Due(true,false,100751));
+    startup.Complete();check(!startup.Pending()&&!startup.Due(true,false,200000));
+    check(!startup.Due(false,false,200001)&&!startup.Due(true,false,300000));
+    CatalogStartupRead busyStartup;check(!busyStartup.Due(true,false,10));
+    check(!busyStartup.Due(true,true,800)&&!busyStartup.Due(true,false,1000));
+    check(!busyStartup.Due(true,false,1749)&&busyStartup.Due(true,false,1750));
     check(ShouldObservePreLive(false,1000,2000));
     check(!ShouldObservePreLive(true,1000,2000));
     check(!ShouldObservePreLive(false,0,2000));
@@ -64,6 +82,24 @@ int main() {
     DesktopTransport transport;std::string transportError;
     check(!transport.Start(L"Z:\\definitely-missing-gakuactors-test.exe",[](const std::string&){return std::string("{}");},transportError));
     check(!transport.Running()&&!transportError.empty());transport.Stop();
+    check(!MotionResourceDetected(false,false,false));
+    check(MotionResourceDetected(true,false,false));
+    check(MotionResourceDetected(false,true,false));
+    check(MotionResourceDetected(false,false,true));
+    check(!MotionResourceConflict(false,false,false));
+    check(MotionResourceConflict(true,false,false));
+    check(MotionResourceConflict(true,true,false));
+    check(!MotionResourceConflict(true,true,true));
+    check(ResourceMayAutoEnable(true,false,false,false));
+    check(!ResourceMayAutoEnable(false,false,false,false));
+    check(!ResourceMayAutoEnable(true,true,false,false));
+    check(!ResourceMayAutoEnable(true,false,true,false));
+    check(!ResourceMayAutoEnable(true,false,false,true));
+    SceneActor yawActor;check(desktop_protocol::ActorYaw(yawActor)==0.0);
+    yawActor.rotation[1]=0.70710678f;yawActor.rotation[3]=0.70710678f;
+    check(std::fabs(desktop_protocol::ActorYaw(yawActor).get<double>()-90.0)<0.01);
+    yawActor.rotation[1]=-0.70710678f;
+    check(std::fabs(desktop_protocol::ActorYaw(yawActor).get<double>()-270.0)<0.01);
     ResourceSession session;session.Reset(-50);
     ResourceIdentity resource{session.generation,-50,-101,-201};
     check(session.Accept(resource));
@@ -112,7 +148,10 @@ int main() {
     wire.resources.push_back({SceneResourceKind::Prop,-12,-12,-7,9,"道具",false});
     Command decoded{Action::Reload};
     auto request=[](const Json& value){return value.dump();};
+    wire.activeSceneName="LiveStage";check(desktop_protocol::Snapshot(wire)["active_scene_name"]=="LiveStage");
     check(desktop_protocol::Snapshot(wire)["presets"].size()==1);
+    check(desktop_protocol::Snapshot(wire)["catalog_auto_pending"]==true);
+    wire.catalogAutoPending=false;check(desktop_protocol::Snapshot(wire)["catalog_auto_pending"]==false);
     wire.liveModels.push_back({-4,"人物","body-a","face-a","hair-a","已构建"});
     const auto liveWire=desktop_protocol::Snapshot(wire)["live_models"];
     check(liveWire.size()==1&&liveWire[0]["body"]=="body-a"&&liveWire[0]["face"]=="face-a"&&liveWire[0]["hair"]=="hair-a"&&liveWire[0]["status"]=="已构建");
@@ -129,6 +168,9 @@ int main() {
     wire.actors[0].modelRestorable=true;
     check(!desktop_protocol::Decode(request({{"version",1},{"action","restore_actor_model"},{"instance",-4},{"scene",-7},{"unique","actor-one"}}),wire,decoded));
     check(desktop_protocol::Decode(request({{"version",1},{"action","scan"}}),wire,decoded)&&decoded.action==Action::Scan);
+    check(desktop_protocol::Decode(request({{"version",1},{"action","read_pre_live_catalog"}}),wire,decoded)&&decoded.action==Action::ReadDesktopCatalog);
+    wire.runtime=true;wire.preLiveCatalogStatus="catalog result";wire.preLiveCatalogRevision=7;const auto catalogWire=desktop_protocol::Snapshot(wire);
+    check(catalogWire["runtime"]==true&&catalogWire["prelive_catalog_status"]=="catalog result"&&catalogWire["prelive_catalog_revision"]==7);
     check(!desktop_protocol::Decode(request({{"version",2},{"action","scan"}}),wire,decoded));
     check(!desktop_protocol::Decode(std::string(desktop_protocol::kMaxRequestBytes+1,'x'),wire,decoded));
     check(desktop_protocol::Decode(request({{"version",1},{"action","spawn"},{"preset_id",normal.id},{"instance",-4}}),wire,decoded)&&decoded.preset.id==normal.id);
@@ -144,6 +186,9 @@ int main() {
     check(!desktop_protocol::Decode(request({{"version",1},{"action","load_part_thumbnail"},{"kind","texture"},{"part_id","arbitrary-name"}}),wire,decoded));
     check(!desktop_protocol::Decode(request({{"version",1},{"action","load_part_thumbnail"},{"kind","body"},{"part_id",42}}),wire,decoded));
     check(desktop_protocol::Decode(request({{"version",1},{"action","move"},{"instance",-4},{"position",{1,2,3}}}),wire,decoded));
+    check(desktop_protocol::Decode(request({{"version",1},{"action","reset_yaw"},{"instance",-4}}),wire,decoded)&&decoded.action==Action::ResetYaw);
+    check(desktop_protocol::Decode(request({{"version",1},{"action","live_pause"},{"enabled",true}}),wire,decoded)&&decoded.action==Action::SetLivePause&&decoded.instance==1);
+    check(!desktop_protocol::Decode(request({{"version",1},{"action","live_pause"},{"enabled",1}}),wire,decoded));
     check(!desktop_protocol::Decode(request({{"version",1},{"action","move"},{"instance",-4},{"position",{1,2,10001}}}),wire,decoded));
     check(desktop_protocol::Decode(request({{"version",1},{"action","hide_resource"},{"kind",1},{"scene",-7},{"instance",-12},{"generation",9},{"hidden",true}}),wire,decoded)&&decoded.resource.name=="道具");
     check(!desktop_protocol::Decode(request({{"version",1},{"action","hide_resource"},{"kind",1},{"scene",-7},{"instance",-12},{"generation",10},{"hidden",true}}),wire,decoded));

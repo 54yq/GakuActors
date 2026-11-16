@@ -9,6 +9,11 @@ pub const LAST:u16=489;
 const PAGE:usize=6;
 static ACTIVE:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
 static EDITOR:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+static SETTINGS:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+static RAW:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    static VISIBILITY:RefCell<Option<std::collections::BTreeMap<u16,bool>>>=const {RefCell::new(None)};
+}
 pub fn active()->bool {ACTIVE.load(Ordering::Relaxed)}
 
 #[derive(Default)]
@@ -37,16 +42,20 @@ fn part_key(kind:&str,id:&str)->String {format!("part:{kind}:{id}")}
 fn char_name(snapshot:&Value,id:&str)->String {snapshot["characters"].as_array().and_then(|xs|xs.iter().find(|x|text_value(x,"id")==id)).map(|x|text_value(x,"name").to_owned()).unwrap_or_else(||id.to_owned())}
 
 pub fn panels(w:i32,h:i32,editing:bool)->[Rect;3] {
-    let x=174;let right=282;let gap=16;let available=w-x-22;
-    let left=if editing {(available-right-2*gap)/2}else{190};
+    let x=174;let right=330;let gap=16;let available=w-x-22;
+    let left=if editing {(available-right-2*gap)/2}else{230};
     let middle=available-left-right-2*gap;
-    [Rect{left:x,top:150,right:x+left,bottom:h-60},Rect{left:x+left+gap,top:150,right:x+left+gap+middle,bottom:h-60},Rect{left:w-22-right,top:150,right:w-22,bottom:h-60}]
+    let top=if SETTINGS.load(Ordering::Relaxed){202}else{150};
+    [Rect{left:x,top,right:x+left,bottom:h-60},Rect{left:x+left+gap,top,right:x+left+gap+middle,bottom:h-60},Rect{left:w-22-right,top,right:w-22,bottom:h-60}]
 }
 unsafe fn place(hwnd:Handle,id:u16,x:i32,y:i32,w:i32,h:i32) {
     let scale=*SCALE.get().unwrap_or(&1.0);let p=|v:i32|(v as f64*scale).round() as i32;
-    MoveWindow(GetDlgItem(hwnd,id as i32),p(x),p(y),p(w.max(1)),p(h.max(1)),1);
+    MoveWindow(GetDlgItem(hwnd,id as i32),p(x),p(y),p(w.max(1)),p(h.max(1)),0);
 }
-unsafe fn visible(hwnd:Handle,id:u16,on:bool) {ShowWindow(GetDlgItem(hwnd,id as i32),if on{5}else{0});}
+unsafe fn visible(hwnd:Handle,id:u16,on:bool) {
+    let buffered=VISIBILITY.with(|v|{let mut v=v.borrow_mut();if let Some(map)=v.as_mut(){map.insert(id,on);true}else{false}});
+    if !buffered {let child=GetDlgItem(hwnd,id as i32);if ((GetWindowLongPtrW(child,-16) as u32&WS_VISIBLE)!=0)!=on {ShowWindow(child,if on{5}else{0});}}
+}
 unsafe fn enabled(hwnd:Handle,id:u16,on:bool) {EnableWindow(GetDlgItem(hwnd,id as i32),on as i32);}
 
 pub unsafe fn create_controls(hwnd:Handle,instance:Handle) {
@@ -59,7 +68,8 @@ pub unsafe fn create_controls(hwnd:Handle,instance:Handle) {
     control(hwnd,instance,"EDIT","",0,0,100,36,WS_BORDER|0x80,456);
     SendMessageW(GetDlgItem(hwnd,456),0x00c5,80,0);
     for id in [410,461,462,463] {control(hwnd,instance,"COMBOBOX","",0,0,180,240,3|0x00200000,id);}
-    for id in [420,421,422,423,424,425,470,471,472,473,474,475,476,477,478,480,481,482,483,484,485,486,487,488] {
+    for id in [421,475] {control(hwnd,instance,"EDIT","",0,0,100,100,0x0004|0x0040|0x0800|0x00200000,id);}
+    for id in [420,422,423,424,425,470,471,472,473,474,476,477,478,480,481,482,483,484,485,486,487,488] {
         control(hwnd,instance,"STATIC","",0,0,100,24,0,id);
     }
     SendMessageW(GetDlgItem(hwnd,400),0x01a0,0,(48.0 * *SCALE.get().unwrap_or(&1.0)) as isize);
@@ -81,48 +91,67 @@ impl App {
         else {send(json!({"version":1,"action":"load_part_thumbnail","kind":kind,"part_id":id}));}
     }
     pub(super) unsafe fn layout_people(&self) {
-        let (w,h)=music_client_size(self.hwnd);let [a,b,c]=panels(w,h,self.editing);let ch=c.bottom-c.top;
+        let (w,h)=music_client_size(self.hwnd);let [a,b,c]=panels(w,h,self.editing);
+        let top=a.top;let cw=c.right-c.left;let iw=(cw-42)/2;
         for (i,id) in [106,126,107,108].into_iter().enumerate(){place(self.hwnd,id,12,122+i as i32*48,130,40);visible(self.hwnd,id,true);}
-        place(self.hwnd,330,174,24,w-500,34);place(self.hwnd,331,174,65,w-420,28);place(self.hwnd,315,174,h-44,w-198,30);
+        place(self.hwnd,330,174,24,w-510,34);place(self.hwnd,331,174,65,w-210,28);
+        place(self.hwnd,315,174,h-44,w-198,30);
         place(self.hwnd,405,w-312,28,132,36);place(self.hwnd,140,w-168,28,145,36);
-        place(self.hwnd,425,174,106,290,30);
-        for (i,id) in [406,407,408,409].into_iter().enumerate(){place(self.hwnd,id,400+i as i32*160,102,150,34);}
+        place(self.hwnd,425,174,108,w-198,28);
+        for (i,id) in [406,407,408,409].into_iter().enumerate(){place(self.hwnd,id,174+i as i32*174,150,164,34);}
+        let grid=|pane:Rect,start:u16,y:i32| {
+            let row=((pane.bottom-y-82)/3).clamp(110,220);let col=(pane.right-pane.left-40)/2;
+            for i in 0..6 {place(self.hwnd,start+i,pane.left+14+(i%2) as i32*(col+12),y+(i/2) as i32*(row+12),col,row);}
+        };
+        let pager=|pane:Rect,prev:u16,next:u16,label:u16| {
+            place(self.hwnd,prev,pane.left+14,pane.bottom-46,84,30);
+            place(self.hwnd,next,pane.right-98,pane.bottom-46,84,30);
+            place(self.hwnd,label,pane.left+106,pane.bottom-42,pane.right-pane.left-212,24);
+        };
         if !self.editing {
-            place(self.hwnd,483,a.left+14,166,a.right-a.left-28,26);place(self.hwnd,484,a.left+14,205,150,22);place(self.hwnd,401,a.left+14,232,a.right-a.left-28,34);place(self.hwnd,400,a.left+8,279,a.right-a.left-16,a.bottom-292);
-            place(self.hwnd,482,b.left+14,166,(b.right-b.left-180).max(100),28);place(self.hwnd,402,b.right-153,163,139,36);
-            place(self.hwnd,422,b.left+20,225,b.right-b.left-40,230);
-            let grid_top=216;let grid_h=(b.bottom-grid_top-62).max(270);let row=(grid_h-20)/3;let col=(b.right-b.left-38)/2;
-            for i in 0..6 {place(self.hwnd,430+i,b.left+14+(i%2) as i32*(col+10),grid_top+(i/2) as i32*(row+10),col,row);}
-            place(self.hwnd,417,b.left+14,b.bottom-45,88,30);place(self.hwnd,418,b.right-102,b.bottom-45,88,30);place(self.hwnd,487,b.left+110,b.bottom-41,b.right-b.left-220,24);
-            place(self.hwnd,481,c.left+14,166,c.right-c.left-28,28);
-            let icon_w=(c.right-c.left-38)/2;
-            let footer=c.bottom-45;let add_y=footer-155;let combo_y=add_y-95;let edit_y=combo_y-75;let icon_h=(ch/6).clamp(80,125);
-            place(self.hwnd,414,c.left+14,207,icon_w,icon_h);place(self.hwnd,415,c.left+24+icon_w,207,icon_w,icon_h);
-            place(self.hwnd,421,c.left+14,219+icon_h,c.right-c.left-28,(edit_y-231-icon_h).max(30));place(self.hwnd,403,c.left+14,edit_y,110,32);place(self.hwnd,404,c.right-100,edit_y,86,32);
-            let bottom=combo_y-30;
-            place(self.hwnd,480,c.left+14,bottom,c.right-c.left-28,24);place(self.hwnd,410,c.left+14,combo_y,c.right-c.left-28,230);place(self.hwnd,424,c.left+14,combo_y+40,c.right-c.left-28,48);place(self.hwnd,411,c.left+14,add_y,c.right-c.left-28,42);place(self.hwnd,423,c.left+14,add_y+52,c.right-c.left-28,62);
-            place(self.hwnd,419,c.left+14,footer,120,30);place(self.hwnd,412,c.left+144,footer,c.right-c.left-158,30);place(self.hwnd,489,(b.left+b.right-110)/2,b.bottom-45,110,30);
+            place(self.hwnd,483,a.left+14,top+18,a.right-a.left-28,26);
+            place(self.hwnd,484,a.left+14,top+57,a.right-a.left-28,22);
+            place(self.hwnd,401,a.left+14,top+84,a.right-a.left-28,34);
+            place(self.hwnd,400,a.left+8,top+130,a.right-a.left-16,a.bottom-top-144);
+            place(self.hwnd,482,b.left+14,top+18,b.right-b.left-180,28);
+            place(self.hwnd,402,b.right-153,top+13,139,36);
+            place(self.hwnd,422,b.left+20,top+80,b.right-b.left-40,200);
+            grid(b,430,top+66);pager(b,417,418,487);
+            place(self.hwnd,489,(b.left+b.right-110)/2,b.bottom-46,110,30);
+            place(self.hwnd,481,c.left+14,top+18,cw-28,28);
+            place(self.hwnd,414,c.left+14,top+58,iw,130);place(self.hwnd,415,c.left+28+iw,top+58,iw,130);
+            let edit=c.bottom-322;
+            place(self.hwnd,421,c.left+14,top+202,cw-28,(edit-top-214).max(70));
+            place(self.hwnd,403,c.left+14,edit,110,32);place(self.hwnd,404,c.right-100,edit,86,32);
+            place(self.hwnd,480,c.left+14,edit+50,cw-28,24);
+            place(self.hwnd,410,c.left+14,edit+78,cw-28,240);
+            place(self.hwnd,424,c.left+14,edit+117,cw-28,48);
+            place(self.hwnd,411,c.left+14,edit+175,cw-28,42);
+            place(self.hwnd,423,c.left+14,edit+225,cw-28,48);
+            place(self.hwnd,419,c.left+14,c.bottom-44,132,30);place(self.hwnd,412,c.left+156,c.bottom-44,cw-170,30);
         } else {
-            for (pane,start,heading,prev,next,page_id) in [(a,440,470,452,453,476),(b,446,471,454,455,477)] {
-                place(self.hwnd,heading,pane.left+14,166,pane.right-pane.left-28,28);
-                let grid_top=252;let grid_h=(pane.bottom-grid_top-62).max(270);let row=(grid_h-20)/3;let col=(pane.right-pane.left-38)/2;
-                for i in 0..6 {place(self.hwnd,start+i,pane.left+14+(i%2) as i32*(col+10),grid_top+(i/2) as i32*(row+10),col,row);}
-                place(self.hwnd,prev,pane.left+14,pane.bottom-45,88,30);place(self.hwnd,next,pane.right-102,pane.bottom-45,88,30);place(self.hwnd,page_id,pane.left+108,pane.bottom-41,pane.right-pane.left-216,24);
+            for (pane,start,heading,prev,next,label) in [(a,440,470,452,453,476),(b,446,471,454,455,477)] {
+                place(self.hwnd,heading,pane.left+14,top+18,pane.right-pane.left-28,28);
+                grid(pane,start,top+102);pager(pane,prev,next,label);
             }
-            place(self.hwnd,472,c.left+14,166,c.right-c.left-28,28);
-            let icon_w=(c.right-c.left-38)/2;
-            place(self.hwnd,414,c.left+14,207,icon_w,145);place(self.hwnd,415,c.left+24+icon_w,207,icon_w,145);
-            place(self.hwnd,464,c.left+14,360,icon_w,30);place(self.hwnd,465,c.left+24+icon_w,360,icon_w,30);
-            place(self.hwnd,475,c.left+14,402,c.right-c.left-28,92);place(self.hwnd,473,c.left+14,510,c.right-c.left-28,23);place(self.hwnd,456,c.left+14,540,c.right-c.left-28,36);place(self.hwnd,457,c.left+14,594,c.right-c.left-28,42);place(self.hwnd,474,c.left+14,646,c.right-c.left-28,70);place(self.hwnd,458,c.left+14,c.bottom-46,c.right-c.left-28,32);
-            place(self.hwnd,459,a.left+14,205,160,32);place(self.hwnd,460,b.left+14,205,160,32);
-            place(self.hwnd,485,a.left+14,250,b.right-a.left-28,70);
-            place(self.hwnd,486,a.left+14,290,a.right-a.left-28,150);place(self.hwnd,488,b.left+14,290,b.right-b.left-28,150);
-            for (i,id) in [461,462,463].into_iter().enumerate(){place(self.hwnd,id,a.left+20,320+i as i32*94,b.right-a.left-40,260);}
-            place(self.hwnd,478,a.left+14,a.bottom-130,b.right-a.left-28,40);
+            place(self.hwnd,459,a.left+14,top+55,160,32);place(self.hwnd,460,b.left+14,top+55,160,32);
+            place(self.hwnd,485,a.left+16,top+104,b.right-a.left-32,60);
+            for (i,id) in [461,462,463].into_iter().enumerate(){place(self.hwnd,id,a.left+20,top+188+i as i32*100,b.right-a.left-40,240);}
+            place(self.hwnd,478,a.left+16,a.bottom-100,b.right-a.left-32,48);
+            place(self.hwnd,486,a.left+14,top+108,a.right-a.left-28,140);place(self.hwnd,488,b.left+14,top+108,b.right-b.left-28,140);
+            place(self.hwnd,472,c.left+14,top+18,cw-28,28);
+            place(self.hwnd,414,c.left+14,top+58,iw,120);place(self.hwnd,415,c.left+28+iw,top+58,iw,120);
+            place(self.hwnd,464,c.left+14,top+190,iw,30);place(self.hwnd,465,c.left+28+iw,top+190,iw,30);
+            place(self.hwnd,475,c.left+14,top+234,cw-28,132);
+            place(self.hwnd,473,c.left+14,top+382,cw-28,24);place(self.hwnd,456,c.left+14,top+412,cw-28,36);
+            place(self.hwnd,457,c.left+14,top+464,cw-28,42);place(self.hwnd,474,c.left+14,top+518,cw-28,56);
+            place(self.hwnd,458,c.left+14,c.bottom-46,cw-28,32);
         }
     }
     pub unsafe fn render_people(&mut self) {
+        VISIBILITY.with(|v|*v.borrow_mut()=Some(Default::default()));
         ACTIVE.store(true,Ordering::Relaxed);EDITOR.store(self.editing,Ordering::Relaxed);
+        SETTINGS.store(self.people.settings,Ordering::Relaxed);RAW.store(self.people.raw_mode,Ordering::Relaxed);
         let available=SENDER.get().is_some();
         let connected=available&&self.snapshot["admitted"].as_bool().unwrap_or(false);
         let ready=connected&&!self.snapshot["busy"].as_bool().unwrap_or(false)&&!self.snapshot["playing"].as_bool().unwrap_or(false)&&!self.snapshot["faulted"].as_bool().unwrap_or(false);
@@ -150,7 +179,9 @@ impl App {
         let name=char_name(&self.snapshot,&self.selected_character);
         text(GetDlgItem(self.hwnd,330),if self.editing {"新建 / 编辑人物预设"}else{"人物与预设"});
         text(GetDlgItem(self.hwnd,331),if self.editing {"看系统预览图选择身体与头部，确认组合后保存。"}else{"选择人物和造型，确认放置位置后加入场景。"});
-        text(GetDlgItem(self.hwnd,425),if !connected {"可编辑已保存预设；场景操作需进入拍摄 / Live"}else if all_chars.is_empty(){"请在资源设置中读取人物目录"}else{"人物目录已就绪"});
+        let catalog_loaded=self.snapshot["catalog_revision"].as_u64().unwrap_or(0)>0;
+        text(GetDlgItem(self.hwnd,425),if !connected {"可编辑已保存预设；场景操作需进入拍摄 / Live"}else if !catalog_loaded {if self.snapshot["catalog_auto_pending"]==false{"自动读取未完成，可手动重试"}else{"正在准备自动读取人物目录…"}}else{"人物目录已就绪"});
+        text(GetDlgItem(self.hwnd,406),if catalog_loaded{"重新读取目录"}else{"读取人物目录"});
         text(GetDlgItem(self.hwnd,407),if self.snapshot["creation_enabled"]==true {"人物加载：已开启"}else{"启用人物加载"});
         text(GetDlgItem(self.hwnd,409),if self.snapshot["resource_enabled"]==true {"资源控制：已开启"}else{"启用资源控制"});
         text(GetDlgItem(self.hwnd,140),if self.snapshot["free_camera_active"]==true {"关闭自由视角"}else{"开启自由视角"});
@@ -166,7 +197,7 @@ impl App {
             sync_resource_list(GetDlgItem(self.hwnd,400),rows,&mut self.people.character_rows,self.characters.iter().position(|x|x==&self.selected_character),false);
             text(GetDlgItem(self.hwnd,483),"01 / 选择人物");text(GetDlgItem(self.hwnd,484),"搜索人物");text(GetDlgItem(self.hwnd,482),&format!("{}的造型 · {}",name,self.presets.len()));
             text(GetDlgItem(self.hwnd,481),"当前造型 · 身体 / 头部");text(GetDlgItem(self.hwnd,480),"03 / 放置位置");
-            if self.presets.is_empty(){visible(self.hwnd,422,true);text(GetDlgItem(self.hwnd,422),if all_chars.is_empty(){"还没有人物目录。\r\n\r\n打开“资源设置”，点击“读取人物目录”。"}else{"这个人物还没有造型预设。\r\n\r\n点击“新建预设”，看图选择身体和头部。"});}
+            if self.presets.is_empty(){visible(self.hwnd,422,true);text(GetDlgItem(self.hwnd,422),if all_chars.is_empty(){"人物目录会在游戏场景就绪后自动读取。\r\n\r\n也可打开“资源设置”，点击“读取人物目录”手动重试。"}else{"这个人物还没有造型预设。\r\n\r\n点击“新建预设”，看图选择身体和头部。"});}
             let page=page_slice(&self.presets,self.people.preset_page).to_vec();for (i,p) in page.iter().enumerate(){let id=430+i as u16;visible(self.hwnd,id,true);text(GetDlgItem(self.hwnd,id as i32),&format!("{}{}",text_value(p,"name"),if text_value(p,"id")==self.selected_preset{" · 已选择"}else{""}));self.request_icon("preset",text_value(p,"id"));}
             text(GetDlgItem(self.hwnd,487),&format!("{} / {}",self.people.preset_page+1,last_page(self.presets.len())+1));enabled(self.hwnd,417,self.people.preset_page>0);enabled(self.hwnd,418,self.people.preset_page<last_page(self.presets.len()));
             let preset=self.presets.iter().find(|p|text_value(p,"id")==self.selected_preset).cloned();
@@ -180,7 +211,11 @@ impl App {
             let reason=if !connected{"请先进入拍摄 / Live 场景。"}else if preset.is_none(){"请先选择或创建一个造型。"}else if self.snapshot["playing"]==true{"请先停止动作播放。"}else if self.snapshot["busy"]==true{"人物正在构建，请稍候。"}else if self.snapshot["faulted"]==true{"人物操作已锁定，请查看状态。"}else if self.snapshot["creation_enabled"]!=true{"请在资源设置中启用人物加载。"}else if self.selected_reference==0{"场景中还没有可用的参考人物。"}else{"已选齐，可以加入场景。"};text(GetDlgItem(self.hwnd,423),reason);enabled(self.hwnd,411,ready&&preset.is_some()&&self.snapshot["creation_enabled"]==true&&self.selected_reference!=0);
             let can_undo=self.people.undo.as_ref().is_some_and(|p|!self.snapshot["presets"].as_array().is_some_and(|ps|ps.iter().any(|x|text_value(x,"id")==text_value(p,"id"))));visible(self.hwnd,489,can_undo);visible(self.hwnd,487,!can_undo);enabled(self.hwnd,489,writable&&available);
         }
-        self.layout_people();InvalidateRect(self.hwnd,null(),0);
+        RAW.store(self.people.raw_mode,Ordering::Relaxed);
+        self.layout_people();
+        let visibility=VISIBILITY.with(|v|v.borrow_mut().take().unwrap_or_default());
+        for (id,on) in visibility {visible(self.hwnd,id,on);}
+        RedrawWindow(self.hwnd,null(),null_mut(),0x0001|0x0004|0x0080);
         for id in [414,415].into_iter().chain(430..=451){InvalidateRect(GetDlgItem(self.hwnd,id),null(),0);}
     }
     unsafe fn render_editor(&mut self,connected:bool,writable:bool) {
@@ -270,7 +305,7 @@ pub unsafe fn paint(dc:Handle,hwnd:Handle) {
     let scale=*SCALE.get().unwrap_or(&1.0);let p=|v:i32|(v as f64*scale).round() as i32;let (w,h)=music_client_size(hwnd);
     let sidebar=CreateSolidBrush(rgb(23,34,57));let rect=Rect{left:0,top:0,right:p(154),bottom:p(h)};FillRect(dc,&rect,sidebar);DeleteObject(sidebar);
     for r in panels(w,h,EDITOR.load(Ordering::Relaxed)){rounded(dc,Rect{left:p(r.left),top:p(r.top),right:p(r.right),bottom:p(r.bottom)},rgb(255,255,255),rgb(220,227,238),p(10));}
-    SetBkMode(dc,1);SetTextColor(dc,rgb(230,237,248));if let Some(font)=HEADING_FONT.get(){SelectObject(dc,*font as Handle);}let mut title=Rect{left:p(16),top:p(30),right:p(150),bottom:p(60)};DrawTextW(dc,wide("GAKUACTORS").as_ptr(),-1,&mut title,0x24);
+    SetBkMode(dc,1);SetTextColor(dc,rgb(230,237,248));if let Some(font)=HEADING_FONT.get(){SelectObject(dc,*font as Handle);}let mut title=Rect{left:p(16),top:p(30),right:p(150),bottom:p(60)};DrawTextW(dc,wide("GAKU").as_ptr(),-1,&mut title,0x24);
     if let Some(font)=FONT.get(){SelectObject(dc,*font as Handle);}SetTextColor(dc,rgb(172,190,216));let mut sub=Rect{left:p(17),top:p(69),right:p(150),bottom:p(95)};DrawTextW(dc,wide("场景资源管理").as_ptr(),-1,&mut sub,0x24);
 }
 unsafe fn label(dc:Handle,value:&str,rect:Rect,color:u32,flags:u32){SetBkMode(dc,1);SetTextColor(dc,color);if let Some(font)=FONT.get(){SelectObject(dc,*font as Handle);}let mut r=rect;DrawTextW(dc,wide(value).as_ptr(),-1,&mut r,flags|0x0800);}
@@ -287,11 +322,11 @@ pub unsafe fn draw_card(item:&DrawItem)->bool {
         let scale=*SCALE.get().unwrap_or(&1.0);let p=|v:i32|(v as f64*scale).round() as i32;let r=item.rect;
         let (name,key,head,selected,pair)=if (430..=435).contains(&id){let Some(v)=a.presets.get(a.people.preset_page*PAGE+(id-430) as usize)else{return true;};(text_value(v,"name"),format!("preset:{}",text_value(v,"id")),false,text_value(v,"id")==a.selected_preset,true)}
         else if (440..=451).contains(&id){let head=id>=446;let (xs,page,start,selected)=if head{(&a.people.heads,a.people.head_page,446,&a.people.head)}else{(&a.people.bodies,a.people.body_page,440,&a.people.body)};let Some(v)=xs.get(page*PAGE+(id-start) as usize)else{return true;};(text_value(v,"name"),part_key(if head{"head"}else{"body"},text_value(v,"id")),head,text_value(v,"id")==selected,false)}
-        else {let head=id==415;let key=if a.editing{if a.people.raw_mode{String::new()}else{part_key(if head{"head"}else{"body"},if head{&a.people.head}else{&a.people.body})}}else{format!("preset:{}",a.selected_preset)};(if head{"头部模型 · 点击放大"}else{"身体模型 · 点击放大"},key,head,false,false)};
+        else {let head=id==415;let key=if a.editing{if a.people.raw_mode{String::new()}else{part_key(if head{"head"}else{"body"},if head{&a.people.head}else{&a.people.body})}}else{format!("preset:{}",a.selected_preset)};(if head{"头部预览"}else{"身体预览"},key,head,false,false)};
         rounded(item.dc,r,if selected{rgb(237,242,255)}else{rgb(248,250,253)},if selected{rgb(53,91,211)}else{rgb(220,227,238)},p(7));
-        let ir=Rect{left:r.left+p(9),top:r.top+p(9),right:r.right-p(9),bottom:r.bottom-p(48)};let result=a.people.cache.get(&key);
+        let ir=Rect{left:r.left+p(9),top:r.top+p(9),right:r.right-p(9),bottom:r.bottom-p(56)};let result=a.people.cache.get(&key);
         if pair{let mid=(ir.left+ir.right)/2;icon(item.dc,result,false,Rect{right:mid-p(3),..ir});icon(item.dc,result,true,Rect{left:mid+p(3),..ir});}else{icon(item.dc,result,head,ir);}
-        let name=if selected{format!("✓ {}",name)}else{name.into()};label(item.dc,&name,Rect{left:r.left+p(9),top:r.bottom-p(42),right:r.right-p(9),bottom:r.bottom-p(5)},if selected{rgb(49,78,170)}else{rgb(35,51,78)},0x10|0x1|0x8000);
+        let name=if selected{format!("✓ {}",name)}else{name.into()};label(item.dc,&name,Rect{left:r.left+p(9),top:r.bottom-p(50),right:r.right-p(9),bottom:r.bottom-p(5)},if selected{rgb(49,78,170)}else{rgb(35,51,78)},0x10|0x1|0x8000);
         if item.state&0x10!=0{let mut focus=r;focus.left+=p(3);focus.top+=p(3);focus.right-=p(3);focus.bottom-=p(3);DrawFocusRect(item.dc,&focus);}
         true
     })

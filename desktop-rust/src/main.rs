@@ -1,4 +1,3 @@
-#![windows_subsystem = "windows"]
 //! Native Windows scene manager connected to the in-game plugin.
 use std::ffi::c_void;
 use std::iter::once;
@@ -9,12 +8,12 @@ use std::sync::{mpsc,Arc,Mutex,OnceLock};
 use std::sync::atomic::{AtomicU16,Ordering};
 use std::time::Duration;
 use serde_json::{json,Value};
-mod pipe;
-mod thumbnail;
-mod music;
-mod preview;
-mod people;
-mod icons;
+#[path="pipe.rs"] pub(crate) mod pipe;
+#[path="thumbnail.rs"] pub(crate) mod thumbnail;
+#[path="music.rs"] pub(crate) mod music;
+#[path="preview.rs"] pub(crate) mod preview;
+#[path="people.rs"] mod people;
+#[path="icons.rs"] pub(crate) mod icons;
 
 type Handle = *mut c_void;
 type WndProc = unsafe extern "system" fn(Handle, u32, usize, isize) -> isize;
@@ -61,6 +60,7 @@ extern "system" {
     fn EnableWindow(hwnd: Handle, enabled: i32) -> i32;
     fn GetDlgItem(hwnd: Handle, id: i32) -> Handle;
     fn GetDlgCtrlID(hwnd:Handle)->i32;
+    fn GetParent(hwnd:Handle)->Handle;
     fn GetFocus()->Handle;
     fn UpdateWindow(hwnd: Handle) -> i32;
     fn GetMessageW(msg: *mut Msg, hwnd: Handle, min: u32, max: u32) -> i32;
@@ -89,7 +89,31 @@ extern "system" {
     fn SetWindowLongPtrW(hwnd:Handle,index:i32,value:isize)->isize;
 }
 #[link(name="comctl32")]
-extern "system" { fn InitCommonControlsEx(value:*const InitCommonControls)->i32; }
+extern "system" {
+    fn InitCommonControlsEx(value:*const InitCommonControls)->i32;
+    fn SetWindowSubclass(hwnd:Handle,proc:unsafe extern "system" fn(Handle,u32,usize,isize,usize,usize)->isize,id:usize,data:usize)->i32;
+    fn DefSubclassProc(hwnd:Handle,msg:u32,wp:usize,lp:isize)->isize;
+}
+unsafe extern "system" fn seek_subclass(hwnd:Handle,msg:u32,wp:usize,lp:isize,_id:usize,_data:usize)->isize {
+    if msg==0x0201 { // Click on the channel jumps to that position; thumb dragging remains native.
+        let x=(lp as u16) as i16 as i32;
+        let mut thumb=Rect{left:0,top:0,right:0,bottom:0};
+        SendMessageW(hwnd,0x0419,0,&mut thumb as *mut Rect as isize); // TBM_GETTHUMBRECT
+        if x<thumb.left || x>thumb.right {
+            let mut channel=Rect{left:0,top:0,right:0,bottom:0};
+            SendMessageW(hwnd,0x041a,0,&mut channel as *mut Rect as isize); // TBM_GETCHANNELRECT
+            let half=(thumb.right-thumb.left)/2;
+            let start=channel.left+half;let end=channel.right-half;
+            if end>start {
+                let pos=((x-start).clamp(0,end-start) as i64*1000/(end-start) as i64) as isize;
+                SendMessageW(hwnd,0x0405,1,pos);
+                SendMessageW(GetParent(hwnd),0x0114,4,hwnd as isize); // TB_THUMBPOSITION
+            }
+            return 0;
+        }
+    }
+    DefSubclassProc(hwnd,msg,wp,lp)
+}
 #[link(name = "kernel32")]
 extern "system" { fn GetModuleHandleW(name: *const u16) -> Handle; }
 #[link(name = "comdlg32")]
@@ -168,7 +192,7 @@ static MUSIC_SUB_FONT:OnceLock<usize>=OnceLock::new();
 static WHITE_BRUSH:OnceLock<usize>=OnceLock::new();
 static BACK_BRUSH:OnceLock<usize>=OnceLock::new();
 static MUSIC_ONLY:OnceLock<bool>=OnceLock::new();
-enum MusicResult { Scan(Result<Vec<Value>,String>), Export(String,Result<(),String>), Preview(String,std::path::PathBuf,Result<(),String>) }
+enum MusicResult { Scan(Result<Vec<Value>,String>), Export(String,Result<(),String>), Download(String,Result<(),String>), Prepare(Result<usize,String>), Preview(String,std::path::PathBuf,Result<(),String>) }
 static MUSIC_RESULT:OnceLock<Mutex<Option<MusicResult>>>=OnceLock::new();
 static NAV_SELECTED:AtomicU16=AtomicU16::new(106);
 thread_local! { static APP:RefCell<Option<App>>=const {RefCell::new(None)}; }
@@ -190,7 +214,7 @@ impl Drop for App {
 }
 fn send(v:Value) { if let Some(tx)=SENDER.get(){let _=tx.send(v);} }
 fn text_value<'a>(v:&'a Value,key:&str)->&'a str {v.get(key).and_then(Value::as_str).unwrap_or("")}
-unsafe fn text(hwnd:Handle,value:&str) {SetWindowTextW(hwnd,wide(value).as_ptr());}
+unsafe fn text(hwnd:Handle,value:&str) {if get_text(hwnd)!=value {SetWindowTextW(hwnd,wide(value).as_ptr());}}
 unsafe fn list_add(hwnd:Handle,value:&str) {let w=wide(value);SendMessageW(hwnd,LB_ADDSTRING,0,w.as_ptr() as isize);}
 unsafe fn sync_resource_list(hwnd:Handle,rows:Vec<String>,cache:&mut Vec<String>,wanted:Option<usize>,reset_top:bool) {
     if rows!=*cache||reset_top {
@@ -207,7 +231,7 @@ unsafe fn selected(hwnd:Handle)->Option<usize> {let n=SendMessageW(hwnd,LB_GETCU
 unsafe fn combo_selected(hwnd:Handle)->Option<usize> {let n=SendMessageW(hwnd,CB_GETCURSEL,0,0);if n<0{None}else{Some(n as usize)}}
 unsafe fn combo_add(hwnd:Handle,value:&str) {let w=wide(value);SendMessageW(hwnd,CB_ADDSTRING,0,w.as_ptr() as isize);}
 unsafe fn get_text(hwnd:Handle)->String {let mut data=[0u16;512];let n=GetWindowTextW(hwnd,data.as_mut_ptr(),data.len() as i32);String::from_utf16_lossy(&data[..n.max(0) as usize])}
-unsafe fn choose_audio_path(owner:Handle,name:&str)->Option<std::path::PathBuf> {
+pub(crate) unsafe fn choose_audio_path(owner:Handle,name:&str)->Option<std::path::PathBuf> {
     let default=name.trim_end_matches(".awb").to_owned()+".wav";
     let mut filename=vec![0u16;32768];let init=wide(&default);if init.len()>filename.len(){return None;}filename[..init.len()].copy_from_slice(&init);
     let filter:Vec<u16>="WAV 音频\0*.wav\0\0".encode_utf16().collect();let ext=wide("wav");
@@ -245,7 +269,7 @@ impl App {
         ShowWindow(GetDlgItem(self.hwnd,132),0);
         if only {ShowWindow(GetDlgItem(self.hwnd,140),0);}
         for id in [102,105] {ShowWindow(GetDlgItem(self.hwnd,id),if music_view {0}else{5});}
-        for id in [133,134,135,136,137,138,139,221,323,335,336] {ShowWindow(GetDlgItem(self.hwnd,id),if music_view {5}else{0});}
+        for id in [133,134,135,136,137,138,139,141,142,143,144,145,221,323,335,336,337,338,339,340] {ShowWindow(GetDlgItem(self.hwnd,id),if music_view {5}else{0});}
         for id in [101,119,118,111,220,321,322] {
             ShowWindow(GetDlgItem(self.hwnd,id),if people {5}else{0});
         }
@@ -277,11 +301,22 @@ impl App {
         });
         text(GetDlgItem(self.hwnd,332),if people {"1   选择人物"}else if actors_view {"当前场景人物"}else if music_view {"歌曲列表"}else if scene {"1   选择场景节点"}else{"1   选择道具"});
         text(GetDlgItem(self.hwnd,333),if people {"2   选择预设"}else if actors_view {"2   人物详情"}else if music_view {"歌曲详情"}else{"2   查看并操作"});
-        text(GetDlgItem(self.hwnd,334),if people {if self.editing {"编辑人物预设"}else{"3   加入与定位"}}else if actors_view {"3   调整人物"}else if scene {"背景与摄影舞台"}else if music_view {"试听播放"}else{"道具操作"});
+        text(GetDlgItem(self.hwnd,334),if people {if self.editing {"编辑人物预设"}else{"3   加入与定位"}}else if actors_view {"3   调整人物"}else if scene {"背景与摄影舞台"}else if music_view {"播放控制"}else{"道具操作"});
         EnableWindow(GetDlgItem(self.hwnd,133),(!self.music_busy) as i32);
         let exportable=self.songs.iter().any(|s|text_value(s,"name")==self.music_selected&&!self.music_selected.is_empty());
         EnableWindow(GetDlgItem(self.hwnd,134),(exportable&&!self.music_busy) as i32);
         EnableWindow(GetDlgItem(self.hwnd,135),(exportable&&!self.music_busy) as i32);
+        let song=self.songs.iter().find(|s|text_value(s,"name")==self.music_selected);
+        let cached=song.is_some_and(|s|s["cached"]==true);
+        let own=song.is_some_and(|s|s["own_cached"]==true);
+        let prepared=song.is_some_and(|s|s["compiled"]==true);
+        EnableWindow(GetDlgItem(self.hwnd,141),(exportable&&cached&&!prepared&&!self.music_busy) as i32);
+        EnableWindow(GetDlgItem(self.hwnd,142),(!self.music_filter.trim().is_empty()&&!self.music_visible.is_empty()&&!self.music_busy) as i32);
+        EnableWindow(GetDlgItem(self.hwnd,143),(prepared&&!self.music_busy) as i32);
+        EnableWindow(GetDlgItem(self.hwnd,144),(exportable&&!cached&&!self.music_busy) as i32);
+        EnableWindow(GetDlgItem(self.hwnd,145),(own&&!self.music_busy) as i32);
+        text(GetDlgItem(self.hwnd,337),if cached {if own {"原始资源缓存：已缓存（乐库）"}else{"原始资源缓存：已缓存（游戏管理）"}}else{"原始资源缓存：未缓存"});
+        text(GetDlgItem(self.hwnd,338),if prepared {"编译后的音频：已编译"}else{"编译后的音频：未编译"});
         EnableWindow(GetDlgItem(self.hwnd,136),self.preview.open as i32);
         EnableWindow(GetDlgItem(self.hwnd,137),self.preview.open as i32);
         EnableWindow(GetDlgItem(self.hwnd,138),self.preview.open as i32);
@@ -419,9 +454,10 @@ impl App {
                     let display=if title.is_empty(){name.trim_end_matches(".awb")}else{title};
                     let kind=if text_value(song,"kind")=="live" {"Live"}else{"通用"};
                     let artist=if performer.is_empty(){"未知演唱"}else{performer};
-                    let cached=if song["cached"].as_bool()==Some(true){"已缓存"}else{"可下载"};
+                    let cached=if song["cached"]==true{"已缓存"}else{"未缓存"};
+                    let compiled=if song["compiled"]==true{"已编译"}else{"未编译"};
                     let variant=name.trim_start_matches("sud_music_general_").trim_start_matches("sud_music_live_").trim_end_matches(".awb");
-                    if only {rows.push(format!("{}\t{}  ·  {}  ·  {}\t{}",display,artist,kind,variant,cached));}
+                    if only {rows.push(format!("{}\t{}  ·  {}  ·  {}\t{}\t{}",display,artist,kind,variant,cached,compiled));}
                     else {rows.push(format!("{}  {}  {}",display,artist,name));}
                 }
                 if rows!=self.music_rows {
@@ -440,7 +476,7 @@ impl App {
                 let desc=self.songs.iter().find(|s|text_value(s,"name")==self.music_selected).map(|s|{
                     let title=text_value(s,"title");let artist=text_value(s,"performer");let name=text_value(s,"name");
                     let wrapped=name.chars().collect::<Vec<_>>().chunks(35).map(|c|c.iter().collect::<String>()).collect::<Vec<_>>().join("\r\n");
-                    format!("{}\r\n\r\n演唱  {}\r\n版本  {}\r\n状态  {}\r\n\r\n资源名称\r\n{}\r\n\r\n未缓存的歌曲会在试听或导出时下载。",if title.is_empty(){"未匹配曲名"}else{title},if artist.is_empty(){"未知"}else{artist},if text_value(s,"kind")=="live"{"Live"}else{"通用"},if s["cached"].as_bool()==Some(true){"已缓存"}else{"可下载"},wrapped)
+                    format!("{}\r\n\r\n演唱  {}\r\n版本  {}\r\n\r\n资源名称\r\n{}",if title.is_empty(){"未匹配曲名"}else{title},if artist.is_empty(){"未知"}else{artist},if text_value(s,"kind")=="live"{"Live"}else{"通用"},wrapped)
                 }).unwrap_or_else(||"选择一首歌曲，查看版本信息并开始试听。".into());
                 text(GetDlgItem(self.hwnd,320),&desc);
             }
@@ -491,19 +527,19 @@ impl App {
                 if !self.music_busy && self.songs.iter().any(|s|text_value(s,"name")==self.music_selected&&!self.music_selected.is_empty()) {
                     if let Some(path)=choose_audio_path(self.hwnd,&self.music_selected) {
                         if path.exists(){self.music_notice="目标文件已存在，请选择其他文件名。".into();self.render();return;}
-                        let name=self.music_selected.clone();self.music_busy=true;self.music_notice="正在准备音频；未缓存时会先下载…".into();self.render();let hwnd=self.hwnd as usize;
-                        std::thread::spawn(move||{let result=music::export(&name,&path);if let Some(slot)=MUSIC_RESULT.get(){if let Ok(mut s)=slot.lock(){*s=Some(MusicResult::Export(name,result));}}unsafe {PostMessageW(hwnd as Handle,WM_SNAPSHOT,0,0);}});
+                        let name=self.music_selected.clone();let digest=self.songs.iter().find(|s|text_value(s,"name")==name).map(|s|text_value(s,"md5").to_owned()).unwrap_or_default();self.music_busy=true;self.music_notice="正在准备音频；未缓存时会先下载…".into();self.render();let hwnd=self.hwnd as usize;
+                        std::thread::spawn(move||{let result=music::prepare_preview(&name,&digest,&path);if let Some(slot)=MUSIC_RESULT.get(){if let Ok(mut s)=slot.lock(){*s=Some(MusicResult::Export(name,result));}}unsafe {PostMessageW(hwnd as Handle,WM_SNAPSHOT,0,0);}});
                     }
                 }
             },
             135=>{
                 if !self.music_busy&&self.songs.iter().any(|s|text_value(s,"name")==self.music_selected&&!self.music_selected.is_empty()) {
                     if let Err(e)=self.preview.stop(){self.music_notice=e;self.render();return;}
-                    let name=self.music_selected.clone();let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+                    let name=self.music_selected.clone();let digest=self.songs.iter().find(|s|text_value(s,"name")==name).map(|s|text_value(s,"md5").to_owned()).unwrap_or_default();let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
                     let path=std::env::temp_dir().join(format!("gakuactors-preview-{}-{stamp}.wav",std::process::id()));
                     self.preview_pending=Some(path.clone());self.music_busy=true;self.music_notice="正在准备试听；未缓存时会先下载…".into();self.render();
                     let hwnd=self.hwnd as usize;let alive=self.preview_alive.clone();
-                    std::thread::spawn(move||{let result=music::export(&name,&path);
+                    std::thread::spawn(move||{let result=music::prepare_preview(&name,&digest,&path);
                         if !alive.load(Ordering::Acquire){let _=std::fs::remove_file(&path);return;}
                         if let Some(slot)=MUSIC_RESULT.get(){if let Ok(mut s)=slot.lock(){*s=Some(MusicResult::Preview(name,path.clone(),result));}}
                         if unsafe{PostMessageW(hwnd as Handle,WM_SNAPSHOT,0,0)}==0{let _=std::fs::remove_file(path);}
@@ -512,6 +548,17 @@ impl App {
             },
             136=>{if let Err(e)=self.preview.toggle_pause(){self.music_notice=e;}self.render();},
             137=>{if let Err(e)=self.preview.stop(){self.music_notice=e;}else{self.music_notice="试听已停止。".into();}self.render();},
+            144=>{if !self.music_busy {let name=self.music_selected.clone();self.music_busy=true;self.music_notice="正在下载原始资源缓存…".into();self.render();let hwnd=self.hwnd as usize;std::thread::spawn(move||{let result=music::download(&name);if let Some(slot)=MUSIC_RESULT.get(){if let Ok(mut s)=slot.lock(){*s=Some(MusicResult::Download(name,result));}}unsafe{PostMessageW(hwnd as Handle,WM_SNAPSHOT,0,0);}});}},
+            145=>{if let Some(song)=self.songs.iter_mut().find(|s|text_value(s,"name")==self.music_selected){if song["own_cached"]==true&&MessageBoxW(self.hwnd,wide("删除乐库下载的原始资源？已编译的音频会保留。").as_ptr(),wide("删除缓存").as_ptr(),0x24)==6 {self.music_notice=match music::remove_raw(text_value(song,"md5")){Ok(())=>"已删除乐库缓存；游戏缓存和已编译音频不受影响。".into(),Err(e)=>e};music::refresh(song);self.render();}}},
+            141|142=>{
+                if self.music_busy{return;}
+                let songs:Vec<(String,String)>=if id==141 {self.songs.iter().filter(|s|text_value(s,"name")==self.music_selected&&s["cached"]==true).map(|s|(text_value(s,"name").to_owned(),text_value(s,"md5").to_owned())).collect()} else if !self.music_filter.trim().is_empty(){self.music_visible.iter().map(|i|&self.songs[*i]).filter(|s|s["cached"]==true&&s["compiled"]!=true).map(|s|(text_value(s,"name").to_owned(),text_value(s,"md5").to_owned())).collect()}else{Vec::new()};
+                if songs.is_empty(){self.music_notice="没有需要编译的已缓存歌曲。".into();self.render();return;}
+                if id==142 && MessageBoxW(self.hwnd,wide(&format!("编译当前搜索结果中已缓存的 {} 个版本？这会占用磁盘空间。",songs.len())).as_ptr(),wide("提前编译歌曲").as_ptr(),0x24)!=6{return;}
+                self.music_busy=true;self.music_notice=format!("正在准备 {} 个版本，请稍候…",songs.len());self.render();let hwnd=self.hwnd as usize;
+                std::thread::spawn(move||{let mut count=0;let mut error=None;for (name,digest) in songs {match music::prepare(&name,&digest){Ok(())=>count+=1,Err(e)=>{error=Some(format!("已准备 {count} 个；{name}：{e}"));break;}}}let result=error.map_or(Ok(count),Err);if let Some(slot)=MUSIC_RESULT.get(){if let Ok(mut s)=slot.lock(){*s=Some(MusicResult::Prepare(result));}}unsafe{PostMessageW(hwnd as Handle,WM_SNAPSHOT,0,0);}});
+            },
+            143=>{if let Some(song)=self.songs.iter_mut().find(|s|text_value(s,"name")==self.music_selected){if MessageBoxW(self.hwnd,wide("删除所选歌曲已编译的音频？原始资源缓存会保留。").as_ptr(),wide("删除编译").as_ptr(),0x24)==6 {self.music_notice=match music::remove_preview(text_value(song,"md5")){Ok(())=>"已删除编译音频。".into(),Err(e)=>e};music::refresh(song);self.render();}}},
             109=>{
                 if let Some((scene,instance))=self.selected_resource {
                     if let Some(r)=self.resources.iter().find(|r|r["scene"].as_i64()==Some(scene)&&r["instance"].as_i64()==Some(instance)) {
@@ -676,10 +723,15 @@ unsafe fn layout_music(hwnd:Handle) {
     let (left,right,player)=music_panels(w,h);let scale=*SCALE.get().unwrap_or(&1.0);
     let p=|n:i32|(n as f64*scale).round() as i32;
     let seek_x=420;let export_x=w-218;let volume_x=(w-498).max(620);let seek_w=(volume_x-seek_x-30).max(100);
+    let compact=right.3<400;let first=if compact{250}else{350};let second=if compact{320}else{438};
     for (id,x,y,cw,ch) in [(330,48,32,w-270,45),(331,48,80,w-270,28),(133,w-210,48,150,42),
         (332,56,154,left.2-48,30),(323,56,190,left.2-48,26),(221,56,219,left.2-48,35),
-        (201,56,265,left.2-48,(left.3-154).max(30)),
-        (333,right.0+30,154,right.2-60,30),(320,right.0+30,206,right.2-60,(right.3-95).max(30)),
+        (339,left.0+left.2-220,260,95,24),(340,left.0+left.2-120,260,95,24),
+        (201,56,286,left.2-48,(left.3-175).max(30)),
+        (333,right.0+30,154,right.2-60,30),(320,right.0+30,196,right.2-60,if compact{50}else{140}),
+        (337,right.0+30,first,right.2-60,24),(144,right.0+30,first+25,(right.2-70)/2,36),(145,right.0+40+(right.2-70)/2,first+25,(right.2-70)/2,36),
+        (338,right.0+30,second,right.2-60,24),(141,right.0+30,second+25,(right.2-70)/2,36),(143,right.0+40+(right.2-70)/2,second+25,(right.2-70)/2,36),
+        (142,w-470,48,240,42),
         (334,56,player.1+19,300,28),(135,56,player.1+68,100,42),(136,168,player.1+68,100,42),(137,280,player.1+68,100,42),
         (335,seek_x,player.1+19,seek_w,28),(138,seek_x,player.1+60,seek_w,38),
         (336,volume_x,player.1+19,export_x-volume_x-20,28),(139,volume_x,player.1+60,export_x-volume_x-40,38),
@@ -754,7 +806,7 @@ unsafe fn draw_music_row(item:&DrawItem) {
     let mut data=vec![0u16;len as usize+1];
     if SendMessageW(item.hwnd,0x0189,item.item_id as usize,data.as_mut_ptr() as isize)<0 {return;}
     let value=String::from_utf16_lossy(&data[..len as usize]);
-    let mut parts=value.split('\t');let title=parts.next().unwrap_or("");let subtitle=parts.next().unwrap_or("");let state=parts.next().unwrap_or("");
+    let mut parts=value.split('\t');let title=parts.next().unwrap_or("");let subtitle=parts.next().unwrap_or("");let state=parts.next().unwrap_or("");let compiled=parts.next().unwrap_or("");
     let scale=*SCALE.get().unwrap_or(&1.0);let p=|n:i32|(n as f64*scale).round() as i32;
     let selected=item.state&1!=0;
     let brush=CreateSolidBrush(if selected {rgb(242,240,253)}else{rgb(255,255,255)});
@@ -762,15 +814,18 @@ unsafe fn draw_music_row(item:&DrawItem) {
     SetBkMode(item.dc,1);
     if let Some(font)=MUSIC_ROW_FONT.get(){SelectObject(item.dc,*font as Handle);}
     SetTextColor(item.dc,if selected {rgb(83,69,169)}else{rgb(37,41,58)});
-    let mut r=Rect{left:item.rect.left+p(16),top:item.rect.top+p(6),right:item.rect.right-p(110),bottom:item.rect.top+p(31)};
+    let mut r=Rect{left:item.rect.left+p(16),top:item.rect.top+p(6),right:item.rect.right-p(220),bottom:item.rect.top+p(31)};
     DrawTextW(item.dc,wide(title).as_ptr(),-1,&mut r,0x0020|0x0004|0x8000|0x0800);
     if let Some(font)=MUSIC_SUB_FONT.get(){SelectObject(item.dc,*font as Handle);}
     SetTextColor(item.dc,rgb(111,117,135));
-    let mut sub=Rect{left:item.rect.left+p(16),top:item.rect.top+p(31),right:item.rect.right-p(110),bottom:item.rect.bottom-p(5)};
+    let mut sub=Rect{left:item.rect.left+p(16),top:item.rect.top+p(31),right:item.rect.right-p(220),bottom:item.rect.bottom-p(5)};
     DrawTextW(item.dc,wide(subtitle).as_ptr(),-1,&mut sub,0x0020|0x0004|0x8000|0x0800);
     SetTextColor(item.dc,if state=="已缓存" {rgb(80,132,111)}else{rgb(137,124,104)});
-    let mut tag=Rect{left:item.rect.right-p(100),top:item.rect.top,right:item.rect.right-p(16),bottom:item.rect.bottom};
-    DrawTextW(item.dc,wide(state).as_ptr(),-1,&mut tag,0x0002|0x0020|0x0004|0x0800);
+    let mut tag=Rect{left:item.rect.right-p(220),top:item.rect.top,right:item.rect.right-p(120),bottom:item.rect.bottom};
+    DrawTextW(item.dc,wide(state).as_ptr(),-1,&mut tag,0x0001|0x0020|0x0004|0x0800);
+    SetTextColor(item.dc,if compiled=="已编译" {rgb(80,132,111)}else{rgb(137,124,104)});
+    let mut tag2=Rect{left:item.rect.right-p(120),top:item.rect.top,right:item.rect.right-p(20),bottom:item.rect.bottom};
+    DrawTextW(item.dc,wide(compiled).as_ptr(),-1,&mut tag2,0x0001|0x0020|0x0004|0x0800);
 }
 unsafe fn draw_resource_row(item:&DrawItem) {
     if item.item_id==u32::MAX{return;}
@@ -860,7 +915,7 @@ unsafe fn wndproc_inner(hwnd: Handle, msg: u32, wp: usize, lp: isize) -> isize {
                 if app.view==View::Music {
                     let pos=app.preview.position().unwrap_or(0);let len=app.preview.length;
                     let display=|ms:u32|format!("{:02}:{:02}",ms/60000,(ms/1000)%60);
-                    text(GetDlgItem(hwnd,335),&format!("试听进度  {} / {}",display(pos),display(len)));
+                    text(GetDlgItem(hwnd,335),&format!("播放进度  {} / {}",display(pos),display(len)));
                     if !app.preview_seek_drag {let tick=if len>0{(pos as u64*1000/len as u64).min(1000)}else{0};SendMessageW(GetDlgItem(hwnd,138),0x0405,1,tick as isize);}
                 }
             }});}0
@@ -878,6 +933,9 @@ unsafe fn wndproc_inner(hwnd: Handle, msg: u32, wp: usize, lp: isize) -> isize {
                         MusicResult::Scan(Err(e))=>app.music_notice=e,
                         MusicResult::Export(name,Ok(()))=>{app.music_notice="歌曲已导出。".into();if let Some(song)=app.songs.iter_mut().find(|s|text_value(s,"name")==name){song["cached"]=Value::Bool(true);}},
                         MusicResult::Export(_,Err(e))=>app.music_notice=e,
+                        MusicResult::Download(name,result)=>app.music_notice=match result{Ok(())=>format!("已下载缓存：{name}"),Err(e)=>e},
+                        MusicResult::Prepare(Ok(count))=>app.music_notice=format!("已准备 {count} 个版本，可以快速试听或导出。"),
+                        MusicResult::Prepare(Err(e))=>app.music_notice=e,
                         MusicResult::Preview(name,path,result)=>{
                             app.preview_pending=None;
                             match result {
@@ -890,6 +948,7 @@ unsafe fn wndproc_inner(hwnd: Handle, msg: u32, wp: usize, lp: isize) -> isize {
                             }
                         },
                     }
+                    for song in &mut app.songs {music::refresh(song);}
                     app.render();
                 }
             }});
@@ -904,13 +963,13 @@ unsafe fn control(parent: Handle, instance: Handle, class: &str, label: &str,
     let style=if is_button {style|0x000b|0x00010000}else if class=="EDIT"||class=="COMBOBOX"||class=="LISTBOX"||class=="msctls_trackbar32" {style|0x00010000}else{style};
     let class = wide(class); let label = wide(label);
     let scale=*SCALE.get().unwrap_or(&1.0);let px=|v:i32| (v as f64*scale).round() as i32;
-    let child = CreateWindowExW(0, class.as_ptr(), label.as_ptr(), WS_CHILD|WS_VISIBLE|style,
+    let child = CreateWindowExW(0, class.as_ptr(), label.as_ptr(), WS_CHILD|WS_VISIBLE|0x04000000|style,
         px(x), px(y), px(w), px(h), parent, id as usize as Handle, instance, null_mut());
     let font=FONT.get().copied().unwrap_or_else(||GetStockObject(DEFAULT_GUI_FONT) as usize);
     if !child.is_null() { SendMessageW(child, WM_SETFONT, font, 1); }
     child
 }
-fn main() {
+pub(crate) fn main() {
     let args:Vec<_>=std::env::args_os().skip(1).collect();
     let music_only=args.iter().any(|x|x=="--music-only");let _=MUSIC_ONLY.set(music_only);
     if let Some(parts)=args.windows(2).find(|p|p[0]=="--model-icons-prefetch") {
@@ -1030,12 +1089,22 @@ fn main() {
         control(hwnd,instance,"STATIC","参考人物",250,625,110,25,0,301);
         let actor=control(hwnd,instance,"COMBOBOX","",360,621,235,240,3|0x00200000,205);
         control(hwnd,instance,"BUTTON","加入场景",605,619,112,36,0,104);
-        control(hwnd,instance,"BUTTON","试听",250,624,115,36,0,135);
+        control(hwnd,instance,"BUTTON","播放",250,624,115,36,0,135);
         control(hwnd,instance,"BUTTON","暂停",375,624,115,36,0,136);
         control(hwnd,instance,"BUTTON","停止",500,624,115,36,0,137);
         control(hwnd,instance,"BUTTON","导出选中歌曲",650,624,155,36,0,134);
-        control(hwnd,instance,"STATIC","试听进度  00:00 / 00:00",250,674,300,25,0,335);
+        control(hwnd,instance,"BUTTON","提前编译",650,624,150,36,0,141);
+        control(hwnd,instance,"BUTTON","批量编译已缓存的搜索结果",810,624,160,36,0,142);
+        control(hwnd,instance,"BUTTON","删除编译",980,624,150,36,0,143);
+        control(hwnd,instance,"BUTTON","下载缓存",650,624,150,36,0,144);
+        control(hwnd,instance,"BUTTON","删除缓存",810,624,150,36,0,145);
+        control(hwnd,instance,"STATIC","原始资源缓存：未缓存",570,350,300,25,0,337);
+        control(hwnd,instance,"STATIC","编译后的音频：未编译",570,438,300,25,0,338);
+        control(hwnd,instance,"STATIC","缓存状态",570,260,95,24,0,339);
+        control(hwnd,instance,"STATIC","编译状态",670,260,95,24,0,340);
+        control(hwnd,instance,"STATIC","播放进度  00:00 / 00:00",250,674,300,25,0,335);
         let seek=control(hwnd,instance,"msctls_trackbar32","",250,702,620,35,0x10,138);
+        SetWindowSubclass(seek,seek_subclass,1,0);
         SendMessageW(seek,0x0406,1,(1000isize)<<16);
         control(hwnd,instance,"STATIC","试听音量：100%",920,674,220,25,0,336);
         let volume=control(hwnd,instance,"msctls_trackbar32","",920,702,280,35,0x10,139);

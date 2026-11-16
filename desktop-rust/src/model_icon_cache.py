@@ -282,10 +282,10 @@ def prepare_record(index, record, download):
     return {'kind': 'downloaded' if count else 'local_extracted', 'bytes': count}
 
 
-def prefetch(index, records, download, workers=4):
+def prefetch(index, records, download, workers=4, manifest=None):
     report = {'total': len(records), 'ready': 0, 'failed': 0, 'downloaded': 0,
               'downloaded_bytes': 0, 'png_cache': 0, 'local_extracted': 0,
-              'failures': [], 'cache': str(records[0]['cache']) if records else ''}
+              'failures': [], 'cache': str(records[0]['cache']) if records else '', 'manifest': manifest}
     started = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         pending = {pool.submit(prepare_record, index, r, download): r for r in records}
@@ -334,16 +334,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('game', type=Path)
     parser.add_argument('--inventory', action='store_true')
+    parser.add_argument('--index-only', action='store_true')
     parser.add_argument('--prefetch', action='store_true')
     parser.add_argument('--download', action='store_true')
     parser.add_argument('--only-missing', action='store_true')
     parser.add_argument('--limit', type=int)
     parser.add_argument('--workers', type=int, default=4, choices=range(1, 9))
     args = parser.parse_args()
-    if not args.inventory and not args.prefetch:
+    if not args.inventory and not args.prefetch and not args.index_only:
         serve(args.game)
         return
     index = icon_index(args.game)
+    if args.index_only:
+        write_index(args.game, index)
+        return
     records, report = inventory(index)
     print(json.dumps(report, ensure_ascii=False), flush=True)
     if args.prefetch:
@@ -351,7 +355,7 @@ def main():
             records = [r for r in records if not r['game_path'].is_file() and not r['bundle'].is_file() and cached_png(r) is None]
         if args.limit is not None:
             records = records[:max(0, args.limit)]
-        result = prefetch(index, records, args.download, args.workers)
+        result = prefetch(index, records, args.download, args.workers, manifest_stamp(args.game))
         write_index(args.game, index)
         print(json.dumps(result, ensure_ascii=False), flush=True)
         if result['failed']:

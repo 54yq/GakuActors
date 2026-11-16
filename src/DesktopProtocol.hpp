@@ -9,14 +9,22 @@ namespace GakuActors::desktop_protocol {
 // thread. Frames are length-limited by the transport before JSON parsing.
 constexpr std::size_t kMaxRequestBytes=64*1024;
 constexpr int kVersion=1;
+inline Json ActorYaw(const SceneActor& actor) {
+    const auto* q=actor.rotation;
+    for(int i=0;i<4;++i)if(!std::isfinite(q[i]))return nullptr;
+    const double yaw=std::atan2(2.0*(q[3]*q[1]+q[0]*q[2]),1.0-2.0*(q[1]*q[1]+q[2]*q[2]))*57.29577951308232;
+    auto normalized=std::fmod(yaw,360.0);if(normalized<0)normalized+=360.0;return normalized;
+}
 inline Json Snapshot(const UiSnapshot& s) {
     Json out{{"version",kVersion},{"admitted",s.admitted},{"status",s.admissionNotice},
-        {"notice",s.notice},{"store_notice",s.storeNotice},{"catalog_notice",s.catalog.notice},{"catalog_revision",s.catalog.revision},{"resource_catalog_notice",s.catalog.resourceNotice},
+        {"notice",s.notice},{"store_notice",s.storeNotice},{"active_scene_name",s.activeSceneName},{"catalog_notice",s.catalog.notice},{"catalog_revision",s.catalog.revision},{"catalog_auto_pending",s.catalogAutoPending},{"resource_catalog_notice",s.catalog.resourceNotice},
         {"resource_status",s.resourceStatus},{"stage_status",s.stageStatus},{"prelive_model_status",s.preLiveApplyStatus+" "+s.preLiveModelStatus},
         {"pose_reset_revision",s.poseResetRevision},{"pose_reset_actor",s.poseResetActor},
         {"pose_reset_position",{s.poseResetPosition[0],s.poseResetPosition[1],s.poseResetPosition[2]}},
+        {"pose_reset_yaw_revision",s.poseResetYawRevision},{"pose_reset_yaw_actor",s.poseResetYawActor},{"pose_reset_yaw",s.poseResetYaw},
+        {"live_pause_available",s.livePauseAvailable},{"live_paused",s.livePaused},{"live_pause_owned",s.livePauseOwned},{"live_pause_status",s.livePauseStatus},{"in_live",s.inLive},
         {"free_camera_active",s.freeCameraActive},{"free_camera_status",s.freeCameraStatus},
-        {"writable",s.writable},{"busy",s.busy},{"playing",s.playing},{"faulted",s.faulted},
+        {"runtime",s.runtime},{"prelive_catalog_status",s.preLiveCatalogStatus},{"prelive_catalog_revision",s.preLiveCatalogRevision},{"writable",s.writable},{"busy",s.busy},{"playing",s.playing},{"faulted",s.faulted},
         {"creation_enabled",s.mutationsEnabled},{"resource_enabled",s.resourceControls},{"resource_enable_pending",s.resourceEnablePending},
         {"motion_conflict",s.motionConflict},{"motion_handoff_available",s.motionHandoffAvailable},{"motion_handoff_requested",s.motionHandoffRequested},{"motion_handoff_released",s.motionHandoffReleased},{"camera_enabled",s.cameraColorEnabled},
         {"camera_color",{s.cameraColor[0],s.cameraColor[1],s.cameraColor[2],s.cameraColor[3]}},
@@ -42,9 +50,9 @@ inline Json Snapshot(const UiSnapshot& s) {
         if(std::none_of(list.begin(),list.end(),[&](const auto& r){return r["character"]==p.character&&r["kind"]==entry.first&&r["resource"]==entry.second;}))
             list.push_back({{"character",p.character},{"kind",entry.first},{"resource",entry.second},{"source","saved_preset"}});
     }
-    for(const auto& m:s.catalog.models)out["models"].push_back({{"character",m.character},{"body",m.body},{"face",m.face},{"hair",m.hair},{"factory",m.factory}});
+    for(const auto& m:s.catalog.models)out["models"].push_back({{"character",m.character},{"body",m.body},{"face",m.face},{"hair",m.hair},{"factory",m.factory},{"costume_id",m.costumeId},{"head_id",m.headId}});
     for(const auto& m:s.liveModels)out["live_models"].push_back({{"instance",m.instance},{"name",m.name},{"body",m.body},{"face",m.face},{"hair",m.hair},{"status",m.status}});
-    for(const auto& a:s.actors)out["actors"].push_back({{"instance",a.instance},{"scene",a.scene},{"unique",a.uniqueId},{"name",a.name},{"preset",a.preset},{"owned",a.owned},{"pose_supported",a.identityValid},{"bodyAsset",a.bodyAsset},{"faceAsset",a.faceAsset},{"hairAsset",a.hairAsset},{"modelRestorable",a.modelRestorable},{"position",{a.position[0],a.position[1],a.position[2]}}});
+    for(const auto& a:s.actors)out["actors"].push_back({{"instance",a.instance},{"scene",a.scene},{"unique",a.uniqueId},{"name",a.name},{"preset",a.preset},{"owned",a.owned},{"pose_supported",a.identityValid},{"bodyAsset",a.bodyAsset},{"faceAsset",a.faceAsset},{"hairAsset",a.hairAsset},{"modelRestorable",a.modelRestorable},{"yaw",ActorYaw(a)},{"position",{a.position[0],a.position[1],a.position[2]}}});
     for(const auto& r:s.resources)out["scene_resources"].push_back({{"kind",static_cast<int>(r.kind)},{"instance",r.instance},{"owner",r.owner},{"scene",r.scene},{"generation",r.generation},{"name",r.name},{"hidden",r.hidden},{"parent",r.parent},{"depth",r.depth},{"locked",r.locked},{"active",r.active}});
     return out;
 }
@@ -66,6 +74,7 @@ inline bool Decode(const std::string& bytes,const UiSnapshot& snapshot,Command& 
         auto j=Json::parse(bytes,nullptr,false);if(!j.is_object()||!j.contains("version")||j["version"]!=kVersion||!j.contains("action")||!j["action"].is_string())return false;
         const auto action=j["action"].get<std::string>();
         if(action=="scan")command={Action::Scan};
+        else if(action=="read_pre_live_catalog")command={Action::ReadDesktopCatalog};
         else if(action=="reload")command={Action::Reload};
         else if(action=="scan_resources")command={Action::ScanResources};
         else if(action=="enable_creation"||action=="enable_resources") {
@@ -103,12 +112,14 @@ inline bool Decode(const std::string& bytes,const UiSnapshot& snapshot,Command& 
             int instance{};if(!IntField(j,"instance",instance)||!instance)return false;
             command={action=="remove"?Action::Remove:Action::Move,{},instance};
             if(action=="move"&&!Vector(j,"position",command.position,3,-10000,10000))return false;
-        } else if(action=="reset_position"||action=="turn"||action=="set_yaw") {
+        } else if(action=="reset_position"||action=="reset_yaw"||action=="turn"||action=="set_yaw") {
             int instance{};if(!IntField(j,"instance",instance)||!instance)return false;
-            command={action=="turn"?Action::Turn:action=="set_yaw"?Action::SetYaw:Action::ResetPosition,{},instance};
+            command={action=="turn"?Action::Turn:action=="set_yaw"?Action::SetYaw:action=="reset_yaw"?Action::ResetYaw:Action::ResetPosition,{},instance};
             if(action=="turn"||action=="set_yaw") {if(!j.contains("degrees")||!j["degrees"].is_number())return false;
                 const double degrees=j["degrees"].get<double>();if(!std::isfinite(degrees)||std::fabs(degrees)>360)return false;
                 command.degrees=static_cast<float>(degrees);}
+        } else if(action=="live_pause") {
+            bool enabled{};if(!BoolField(j,"enabled",enabled))return false;command={Action::SetLivePause,{},enabled?1:0};
         } else if(action=="camera_color") {
             bool enabled{};if(!BoolField(j,"enabled",enabled))return false;command={Action::CameraColor};command.hidden=enabled;
             if(!Vector(j,"color",command.color,4,0,1))return false;

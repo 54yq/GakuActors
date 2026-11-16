@@ -1,6 +1,6 @@
 # GakuActors 场景资源管理器
 
-GakuActors 是一个面向《学园偶像大师》的 **GakuLoader 插件**。它提供独立的 Windows 窗口，帮助你在拍摄或 Live 场景中管理人物、场景节点和道具：可以读取游戏中的人物与服装信息，保存头身组合，将新人物加入场景，并调整其位置与朝向。
+GakuActors 是一个面向《学园偶像大师》的 **GakuLoader 插件**。它提供基于 Slint 软件渲染的独立 Windows 窗口，帮助你在拍摄或 Live 场景中管理人物、场景节点和道具：可以读取游戏中的人物与服装信息，保存头身组合，将新人物加入场景，并调整其位置与朝向。
 
 人物、场景和道具管理不要求安装动作插件；如果还想播放外部动作，可以另外安装 [GakuMotion](https://github.com/crested-ezios/GakuMotion)。GakuActors 不会自动给新人物绑定或复制动作，需要在动作插件中操作。
 
@@ -77,7 +77,7 @@ GakuActors 是一个面向《学园偶像大师》的 **GakuLoader 插件**。�
 
 ### 读取目录并加入人物
 
-1. 在人物页打开 **资源设置**，点击 **读取人物目录**，等待目录读取完成。
+1. 插件启动后会自动等候游戏进入拍摄或 Live 场景，场景稳定后读取一次人物目录。首次尚未就绪时会间隔重试；需要手动刷新时，在人物页打开 **资源设置**，点击 **重新读取目录**（尚未读到目录时显示 **读取人物目录**）。
 2. 在左栏搜索或选择人物，在中栏的造型图库选择预设，右栏确认身体与头部的系统预览图。
 3. 在 **资源设置**中点击 **启用人物加载**。如果正在使用动作插件播放动作，请先停止播放。
 4. 在右栏 **放置位置**中选择参考人物位置，点击 **加入场景**。按钮下方显示尚未满足的条件。
@@ -155,8 +155,8 @@ GakuActors 可以独立管理场景资源；GakuMotion 负责外部动作、镜�
 # 构建含相机功能的游戏插件：输出 build/GakuActors.dll
 ./build.ps1 -Target Runtime -ConanToolchain <Conan生成的toolchain路径>
 
-# 构建独立窗口：输出 desktop-rust/target/release/gakuactors-desktop.exe
-cargo build --release --manifest-path desktop-rust/Cargo.toml
+# 构建并整理独立窗口及其许可：输出 build/slint-desktop/
+./build-desktop.ps1
 ```
 
 若使用便携式 MSVC 或 Windows SDK，可向 `build.ps1` 传入 `-PortableVisualStudio` 和 `-WindowsSdkRoot`。安装时将 Rust 产物重命名为 `GakuActors.Desktop.exe`，与 DLL 一起放入 `GakuLoader/plugins/`。上述命令只构建，不会自动部署到游戏目录。
@@ -164,6 +164,8 @@ cargo build --release --manifest-path desktop-rust/Cargo.toml
 `-Cmake` 可指定 CMake 可执行文件，`-CmakeVisualStudio` 可指定 Visual Studio 实例。构建脚本同时将 GPL-3.0 许可证放入输出目录；发行整合版时须附带许可证和对应源码。
 
 开发实现和历史验证记录见 [独立窗口说明](docs/NATIVE_DESKTOP.md)、[场景资源迁移记录](docs/SCENE_RESOURCE_MIGRATION.md) 和 [验证记录](docs/VALIDATION.md)；历史记录中的版本与状态不一定代表当前最新构建。
+
+当前 Slint 页面、软件渲染配置、图片缓存限制及实机验收边界见 [Slint 独立窗口](docs/SLINT_DESKTOP.md)。
 
 ## 鸣谢与关联项目
 
@@ -178,4 +180,4 @@ cargo build --release --manifest-path desktop-rust/Cargo.toml
 
 ## 许可
 
-本项目原有代码采用 [MIT License](LICENSE)；整合相机功能的 `GakuActors.dll` 包含 GPL-3.0 代码，整合版发行须遵守 [GPL-3.0](camera-core/LICENSE)。第三方组件分别遵循各自的许可证。游戏及其资源的权利属于相应权利人。
+本项目原有代码采用 [MIT License](LICENSE)；整合相机功能的 `GakuActors.dll` 和包含 Slint 的独立窗口均含 GPL-3.0 组件，整合版发行须遵守 [GPL-3.0](camera-core/LICENSE)。第三方组件分别遵循各自的许可证。游戏及其资源的权利属于相应权利人。

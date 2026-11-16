@@ -25,12 +25,19 @@ pub fn load_volume()->u32 {
 }
 pub fn save_volume(volume:u32)->Result<(),String> {
     if volume>100{return Err("音量超出范围".into());}
+    save_setting("preview_volume",volume.into())
+}
+pub fn load_theme()->i32 {
+    config_path().ok().and_then(|p|std::fs::read(p).ok()).and_then(|b|serde_json::from_slice::<serde_json::Value>(&b).ok()).and_then(|v|v["library_theme"].as_i64()).filter(|v|(0..=2).contains(v)).unwrap_or(0) as i32
+}
+pub fn save_theme(theme:i32)->Result<(),String>{if !(0..=2).contains(&theme){return Err("主题设置无效".into());}save_setting("library_theme",theme.into())}
+fn save_setting(key:&str,value:serde_json::Value)->Result<(),String>{
     let path=config_path()?;let parent=path.parent().ok_or("配置目录无效")?;
     std::fs::create_dir_all(parent).map_err(|e|format!("无法保存音量：{e}"))?;
     let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
     let temp=parent.join(format!("music-player-{}-{stamp}.tmp",std::process::id()));
     let mut data=match std::fs::read(&path){Ok(bytes)=>serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_|"音量配置文件格式无效，未覆盖。".to_string())?,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>serde_json::json!({}),Err(e)=>return Err(format!("无法读取音量配置：{e}"))};
-    let object=data.as_object_mut().ok_or("音量配置文件格式无效，未覆盖。")?;object.insert("preview_volume".into(),volume.into());
+    let object=data.as_object_mut().ok_or("播放器配置文件格式无效，未覆盖。")?;object.insert(key.into(),value);
     let bytes=serde_json::to_vec(&data).map_err(|e|e.to_string())?;
     std::fs::write(&temp,bytes).map_err(|e|format!("无法保存音量：{e}"))?;
     if unsafe{MoveFileExW(wide(temp.as_os_str()).as_ptr(),wide(path.as_os_str()).as_ptr(),0x1|0x8)}==0 {
@@ -60,6 +67,7 @@ impl Player {
     pub fn seek(&mut self,ms:u32)->Result<(),String>{if !self.open{return Ok(())};let at=ms.min(self.length.saturating_sub(1));
         if self.paused{send(&format!("seek gaku_library_preview to {at}"))?;}else{send(&format!("play gaku_library_preview from {at}"))?;}Ok(())}
     pub fn position(&self)->Option<u32>{if !self.open{return None;}send("status gaku_library_preview position").ok()?.trim().parse().ok()}
+    pub fn finished(&self)->bool {self.open && !self.paused && send("status gaku_library_preview mode").is_ok_and(|m|m.trim()=="stopped") && self.position().is_some_and(|p|p>=self.length.saturating_sub(500))}
     pub fn stop(&mut self)->Result<(),String>{if self.open{send("close gaku_library_preview")?;self.open=false;self.paused=false;self.length=0;}
         if let Some(path)=self.path.take(){let _=std::fs::remove_file(path);}Ok(())}
 }

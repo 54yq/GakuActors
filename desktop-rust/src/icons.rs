@@ -39,6 +39,16 @@ impl Reader {
         let data=reply["data"].as_str().unwrap_or("");if data.is_empty(){return Err(reply["status"].as_str().unwrap_or("官方图标不可用").into());}super::thumbnail::decode(data)
     }
 }
+pub fn build_index(game:&Path)->Result<(),String>{
+    let mut command=command(game)?;command.arg("--index-only").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    let mut child=command.spawn().map_err(|e|e.to_string())?;let mut input=child.stdin.take().ok_or("图标输入不可用")?;initialize(&mut input)?;drop(input);
+    if child.wait().map_err(|e|e.to_string())?.success(){Ok(())}else{Err("本地图标目录不可用".into())}
+}
+pub fn background_prefetch(game:&Path)->Result<(),String>{
+    let mut command=command(game)?;command.args(["--prefetch","--workers","1"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    let mut child=command.spawn().map_err(|e|e.to_string())?;let mut input=child.stdin.take().ok_or("图标输入不可用")?;initialize(&mut input)?;drop(input);
+    if child.wait().map_err(|e|e.to_string())?.success(){Ok(())}else{Err("部分本地图标尚未缓存".into())}
+}
 pub fn prefetch(game:&Path,download:bool)->Result<(),String>{
     let mut command=command(game)?;command.arg("--prefetch").stdin(Stdio::piped());if download{command.arg("--download");}
     let mut child=command.spawn().map_err(|e|e.to_string())?;let mut input=child.stdin.take().ok_or("图标输入不可用")?;initialize(&mut input)?;drop(input);
@@ -59,12 +69,9 @@ pub fn names(snapshot:&Value,request:&Value)->(String,String){
     let preset=snapshot["presets"].as_array().and_then(|ps|ps.iter().find(|p|p["id"]==request["preset_id"]));
     let Some(p)=preset else{return (String::new(),String::new());};
     let mut body=find("bodies",p["body"].as_str().unwrap_or(""));let mut head=find("heads",p["head"].as_str().unwrap_or(""));
-    if body.is_empty()&&p["bodyAsset"].as_str().is_some_and(|s|!s.is_empty()){
-        let rows:Vec<_>=snapshot["bodies"].as_array().map(|xs|xs.iter().filter(|x|x["resource"]==p["bodyAsset"]).collect()).unwrap_or_default();if rows.len()==1{body=rows[0]["thumbnail"].as_str().unwrap_or("").into();}
-    }
-    if head.is_empty()&&p["faceAsset"].as_str().is_some_and(|s|!s.is_empty())&&p["hairAsset"].as_str().is_some_and(|s|!s.is_empty()){
-        let rows:Vec<_>=snapshot["heads"].as_array().map(|xs|xs.iter().filter(|x|x["resource"]==p["hairAsset"]&&x["face_resource"]==p["faceAsset"]).collect()).unwrap_or_default();if rows.len()==1{head=rows[0]["thumbnail"].as_str().unwrap_or("").into();}
-    }
+    if body.is_empty() {if let Some(id)=crate::people_catalog::raw_part(snapshot,"body",p["bodyAsset"].as_str().unwrap_or(""),"",""){body=find("bodies",&id);}}
+    if head.is_empty() {if let Some(id)=crate::people_catalog::raw_part(snapshot,"head","",p["faceAsset"].as_str().unwrap_or(""),p["hairAsset"].as_str().unwrap_or("")){head=find("heads",&id);}}
+
     (body,head)
 }
 pub fn fill(image:&mut Option<super::thumbnail::Bitmap>,name:&str,status:&mut String,reader:&mut Option<Reader>,start_failed:&mut bool){
@@ -73,3 +80,4 @@ pub fn fill(image:&mut Option<super::thumbnail::Bitmap>,name:&str,status:&mut St
     if let Some(reader)=reader{match reader.read(name){Ok(bitmap)=>{*image=Some(bitmap);*status="系统模型预览图 · 本地缓存".into();},Err(error)=>*status=error}}
 }
 #[cfg(test)]mod tests{use super::*;#[test]fn raw_heads_require_both_native_relations(){let mut s=json!({"presets":[{"id":"p","hairAsset":"hair","faceAsset":"face"}],"heads":[{"id":"h1","resource":"hair","face_resource":"face","thumbnail":"exact"},{"id":"h2","resource":"hair","face_resource":"other","thumbnail":"wrong"}]});assert_eq!(names(&s,&json!({"action":"load_thumbnail","preset_id":"p"})).1,"exact");s["heads"][1]["face_resource"]="face".into();assert!(names(&s,&json!({"action":"load_thumbnail","preset_id":"p"})).1.is_empty());}}
+

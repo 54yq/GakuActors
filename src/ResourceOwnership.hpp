@@ -4,6 +4,17 @@
 #include <vector>
 
 namespace GakuActors {
+// Treat either Motion service as evidence of a potential controller. An
+// incomplete handoff API cannot establish release and must fail closed.
+inline bool MotionResourceDetected(bool playbackService,bool requestService,bool releasedService) {
+    return playbackService||requestService||releasedService;
+}
+inline bool MotionResourceConflict(bool detected,bool handoffAvailable,bool released) {
+    return detected&&(!handoffAvailable||!released);
+}
+inline bool ResourceMayAutoEnable(bool admitted,bool motionDetected,bool pending,bool alreadyEnabled) {
+    return admitted&&!motionDetected&&!pending&&!alreadyEnabled;
+}
 // Value-only identities and restoration policy. Unity handles stay with the
 // caller and are never kept in a GUI snapshot or persisted in configuration.
 struct ResourceIdentity {

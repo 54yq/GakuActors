@@ -335,7 +335,7 @@ bool CaptureScenePoseBaseline(const SceneActor& expected,void* actor) {
     auto it=std::find_if(poseBaselines_.begin(),poseBaselines_.end(),[&](const auto& b){return b.instance==expected.instance&&b.scene==expected.scene&&b.index==expected.actorIndex&&b.unique==expected.uniqueId;});
     if(it!=poseBaselines_.end())return true;
     PoseBaseline baseline;baseline.instance=expected.instance;baseline.scene=expected.scene;baseline.index=expected.actorIndex;baseline.unique=expected.uniqueId;
-    float rotation[4];Pose(actor,baseline.position,rotation);
+    Pose(actor,baseline.position,baseline.rotation);
     if(expected.owned)for(const auto& lease:owned_)if(lease.ready&&lease.identity.instance==expected.instance&&lease.identity.scene==expected.scene){std::memcpy(baseline.position,lease.spawnPosition,sizeof(baseline.position));break;}
     poseBaselines_.push_back(std::move(baseline));return true;
 }
@@ -353,6 +353,15 @@ bool ResetSceneActor(const SceneActor& expected,float* target=nullptr) {
     if(it==poseBaselines_.end())return false;
     if(target)std::memcpy(target,it->position,sizeof(it->position));
     float current[3],rotation[4];Pose(actor,current,rotation);SetPose(actor,it->position,rotation);notice="人物位置已重置";return true;
+}
+bool ResetSceneActorRotation(const SceneActor& expected,float* target=nullptr) {
+    if(Faulted()||Busy()){notice="人物操作繁忙或被锁定";return false;}
+    void* actor=ResolveScenePoseActor(expected);if(!actor){notice="人物身份或场景已变化，请重新扫描";return false;}
+    if(!CaptureScenePoseBaseline(expected,actor))return false;
+    const auto it=std::find_if(poseBaselines_.begin(),poseBaselines_.end(),[&](const auto& b){return b.instance==expected.instance&&b.scene==expected.scene&&b.index==expected.actorIndex&&b.unique==expected.uniqueId;});
+    if(it==poseBaselines_.end())return false;
+    if(target)std::memcpy(target,it->rotation,sizeof(it->rotation));
+    float position[3],rotation[4];Pose(actor,position,rotation);SetPose(actor,position,it->rotation);notice="人物朝向已重置";return true;
 }
 bool TurnSceneActor(const SceneActor& expected,float degrees,bool absolute) {
     if(Faulted()||Busy()||!std::isfinite(degrees)||std::fabs(degrees)>360){notice="人物操作繁忙或朝向数值无效";return false;}

@@ -40,9 +40,13 @@ try {
         if($LASTEXITCODE -ne 0){throw 'Core tests did not compile.'}
         & (Join-Path $OutputRoot 'core_tests.exe')
         if($LASTEXITCODE -ne 0){throw 'Core tests failed.'}
+        & $compiler @common (Join-Path $repo 'tests/desktop_listener_tests.cpp') "/Fo$OutputRoot/obj/desktop-listener.obj" "/Fe$OutputRoot/desktop_listener_tests.exe" advapi32.lib
+        if($LASTEXITCODE -ne 0){throw 'Desktop listener tests did not compile.'}
+        & (Join-Path $OutputRoot 'desktop_listener_tests.exe')
+        if($LASTEXITCODE -ne 0){throw 'Desktop listener test failed.'}
         $uiSources=@('vendor/imgui/imgui.cpp','vendor/imgui/imgui_draw.cpp','vendor/imgui/imgui_widgets.cpp','vendor/imgui/imgui_tables.cpp') | ForEach-Object {Join-Path $repo $_}
         New-Item -ItemType Directory -Path (Join-Path $OutputRoot 'startup-obj') -Force | Out-Null
-        & $compiler @common (Join-Path $repo 'tests/startup_policy_tests.cpp') @uiSources "/Fo$OutputRoot/startup-obj/" "/Fe$OutputRoot/startup_policy_tests.exe" user32.lib comdlg32.lib ole32.lib windowscodecs.lib crypt32.lib
+        & $compiler @common (Join-Path $repo 'tests/startup_policy_tests.cpp') @uiSources "/Fo$OutputRoot/startup-obj/" "/Fe$OutputRoot/startup_policy_tests.exe" user32.lib comdlg32.lib ole32.lib windowscodecs.lib crypt32.lib advapi32.lib
         if($LASTEXITCODE -ne 0){throw 'Startup policy tests did not compile.'}
         & (Join-Path $OutputRoot 'startup_policy_tests.exe')
         if($LASTEXITCODE -ne 0){throw 'Startup policy tests failed.'}

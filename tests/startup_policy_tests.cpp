@@ -1,5 +1,5 @@
 // Test the actual plugin frame pump with runtime-ready=true and deliberately
-// absent IL2CPP pointers. Any automatic native startup scan would fail this test.
+// absent IL2CPP pointers. Automatic reads must wait for actual scene admission.
 #include "Plugin.cpp"
 #include <cassert>
 #include <iostream>
@@ -30,6 +30,7 @@ int main() {
     assert(!s.dialogOpen&&!s.catalogRequested&&!s.sceneRequested);
     for(int i=0;i<120;++i)TickImpl(&s,1.0f/60.0f);
     assert(!s.snapshot.admitted&&!s.sceneRequested&&!s.catalogRead);
+    assert(s.catalogStartup.Pending()&&s.catalogStartup.Attempts()==0);
     assert(s.snapshot.actors.empty()&&s.snapshot.catalog.characters.empty());
     // The pre-Live page may be opened outside a performance scene; a missing
     // runtime must fail closed without dereferencing any game API pointers.
@@ -37,6 +38,14 @@ int main() {
     assert(!s.snapshot.preLiveDetected&&s.snapshot.preLiveStatus=="游戏运行时尚未就绪");
     auto reply=Json::parse(DesktopMessage(s,R"({"version":1,"action":"snapshot"})"));
     assert(reply["accepted"]==true&&reply["snapshot"]["admitted"]==false);
+    // A desktop request reaches the real frame pump outside a scene but must
+    // fail closed when the confirmed page/runtime is unavailable.
+    reply=Json::parse(DesktopMessage(s,R"({"version":1,"action":"read_pre_live_catalog"})"));
+    assert(reply["accepted"]==true&&s.commands.size()==1);
+    TickImpl(&s,.016f);
+    assert(s.snapshot.preLiveCatalogRevision==1&&!s.snapshot.admitted);
+    assert(s.snapshot.preLiveCatalogStatus.find("游戏运行时尚未就绪")!=std::string::npos);
+    assert(s.snapshot.catalog.characters.empty()&&s.snapshot.resources.empty()&&!s.preLiveResourceScan);
     reply=Json::parse(DesktopMessage(s,R"({"version":1,"action":"scan_resources"})"));
     assert(reply["accepted"]==true&&s.commands.size()==1);
     reply=Json::parse(DesktopMessage(s,R"({"version":1,"action":"unknown"})"));
@@ -68,5 +77,5 @@ int main() {
     assert(!s.snapshot.admitted&&!s.native.MutationsEnabled());
     s.native.SuspendScene();s.native.Shutdown();
     assert(s.native.PerformanceScene()==0&&!s.snapshot.mutationsEnabled);
-    std::cout<<"Actual plugin startup pump: 120 frames, repeated spawn/remove/move and lifecycle; zero game API pointers required\n";
+    std::cout<<"Actual plugin startup pump: automatic catalog waits for admission; 120 idle frames and lifecycle passed\n";
 }

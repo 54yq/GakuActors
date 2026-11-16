@@ -15,6 +15,7 @@
 - `src/NativeResources.inl` 中的道具名称保护规则改编自 GakuMotion 的 `src/GkLiveActorPropPolicy.hpp`，场景视觉节点名称分类参考 `src/GkStageManager.hpp`，基线提交 `1757f8e`。其 MIT 许可及版权声明保存在 `vendor/GakuMotion-LICENSE.txt`。
 - 摄影背景载入钩子的接口定位和预设名称参考同一提交中的 `src/GkStageLoadOverride.hpp`、`src/GkStageLoadPolicy.hpp`；纯色相机操作及场景保护名单参考 `src/GkStageManager.hpp` 和 `src/GkStageRuntime.hpp`。本项目的实现及生命周期保护仍需单独验证。
 - Rust 窗口使用的运行时依赖由 `desktop-rust/Cargo.lock` 锁定；所选 MIT 许可文本和各库版权声明保存在 `desktop-rust/licenses/`。窗口程序发布时应一并提供这些许可文件。
+- 资源管理窗口使用 Slint 1.19.0，选择 GPL-3.0 许可；其 software renderer 和 Winit 后端通过显式特性启用。包含 Slint 的窗口程序按 GPL-3.0 分发，不将其重新授权为 MIT。`build-desktop.ps1` 收集 Cargo 依赖许可及版本清单；锁定源码依赖见 `desktop-rust/Cargo.lock`。乐库的原有 Win32 入口保留在同一程序的独立启动分支中。
 
 模型实体问题的排查另参考了用户提供的 `https://github.com/chihya72/gakumas-modding` 文档及其链接的 `gakumas-mod-runtime` 项目，核对了实际资产加载、网格／材质／骨骼和初始化的边界。未复制该 GPL 项目的加载／替换源代码；本插件使用独立实现的元数据调用桥接与游戏原生角色加载入口，不将替换现有网格冒充新增完整角色。
 

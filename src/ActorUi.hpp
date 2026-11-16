@@ -15,8 +15,8 @@ class ActorUi {
     char search_[160]{},name_[192]{},bodyAsset_[320]{},faceAsset_[320]{},hairAsset_[320]{};
     std::string character_,selection_,editId_,body_,head_,factory_;
     bool editor_{},advanced_{},special_{},crossCharacter_{};
-    int primary_{},positionActor_{},resetWaitActor_{};float position_[3]{},yaw_{};
-    uint64_t resetWaitRevision_{};
+    int primary_{},positionActor_{},resetWaitActor_{},resetYawWaitActor_{};float position_[3]{},yaw_{};
+    uint64_t resetWaitRevision_{},resetYawWaitRevision_{};
     std::string selectedDelete_,thumbnailId_,thumbnailBodyData_,thumbnailHeadData_,thumbnailBodyStatus_,thumbnailHeadStatus_;
     std::string preLivePreset_,preLiveManualCharacter_,preLiveEditCharacter_,preLiveImportStatus_;size_t preLiveSlot_{};
     char preLiveBody_[320]{},preLiveFace_[320]{},preLiveHair_[320]{};
@@ -407,6 +407,13 @@ public:
                 if(a.owned){ImGui::SameLine();ImGui::BeginDisabled(!s.mutationsEnabled||s.playing||s.busy);
                 if(ImGui::Button("移除人物"))commands.push_back({Action::Remove,{},a.instance});ImGui::EndDisabled();}
                 if(positionActor_==a.instance) {
+                    if(resetYawWaitActor_==a.instance&&s.poseResetYawActor==a.instance&&s.poseResetYawRevision>resetYawWaitRevision_) {yaw_=s.poseResetYaw;resetYawWaitActor_=0;}
+                    if(s.inLive) {
+                        ImGui::BeginDisabled(!s.livePauseAvailable||(s.livePaused&&!s.livePauseOwned));
+                        if(ImGui::Button(s.livePauseOwned?"恢复 Live 播放":"暂停人物动作（暂停 Live）"))commands.push_back({Action::SetLivePause,{},s.livePauseOwned?0:1});
+                        ImGui::EndDisabled();
+                        ImGui::TextWrapped("%s",s.livePauseStatus.empty()?"暂停会同时暂停 Live 音乐。":s.livePauseStatus.c_str());
+                    }
                     if(resetWaitActor_==a.instance&&s.poseResetActor==a.instance&&s.poseResetRevision>resetWaitRevision_) {
                         std::memcpy(position_,s.poseResetPosition,sizeof(position_));resetWaitActor_=0;
                     }
@@ -418,6 +425,7 @@ public:
                     if(ImGui::Button("重置位置")){resetWaitActor_=a.instance;resetWaitRevision_=s.poseResetRevision;commands.push_back({Action::ResetPosition,{},a.instance});}
                     ImGui::SetNextItemWidth(220);ImGui::SliderFloat("朝向（0–360°）",&yaw_,0.0f,360.0f,"%.1f°");
                     if(ImGui::Button("设置朝向")){Command cmd{Action::SetYaw,{},a.instance};cmd.degrees=yaw_;commands.push_back(cmd);}
+                    ImGui::SameLine();if(ImGui::Button("重置朝向")){resetYawWaitActor_=a.instance;resetYawWaitRevision_=s.poseResetYawRevision;commands.push_back({Action::ResetYaw,{},a.instance});}
                     ImGui::SameLine();if(ImGui::Button("左转 15°")){Command cmd{Action::Turn,{},a.instance};cmd.degrees=-15;commands.push_back(cmd);yaw_=std::fmod(yaw_+345.0f,360.0f);}
                     ImGui::SameLine();if(ImGui::Button("右转 15°")){Command cmd{Action::Turn,{},a.instance};cmd.degrees=15;commands.push_back(cmd);yaw_=std::fmod(yaw_+15.0f,360.0f);}
                     ImGui::EndDisabled();

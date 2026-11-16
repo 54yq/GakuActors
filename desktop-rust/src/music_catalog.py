@@ -93,6 +93,7 @@ def read_catalog(manifest, cache):
         obj = item.get(11, b'').decode('ascii')
         result.append({'id': resource_id, 'name': name, 'size': item.get(4),
                        'md5': digest, 'object_name': obj, 'path': str(chosen),
+                       'game_path': str(path),
                        'cached': chosen.is_file(), 'kind': 'live' if is_live else 'general'})
     return revision, result
 
@@ -243,6 +244,7 @@ def main():
     parser.add_argument('--json', type=Path, help='write an inventory to this path')
     parser.add_argument('--filter', default='', help='case-insensitive substring in resource name')
     parser.add_argument('--export', help='exact AWB name to decode to PCM WAV')
+    parser.add_argument('--download', help='download one exact audio resource to the library cache')
     parser.add_argument('--output', type=Path, help='WAV output path; must not already exist')
     args = parser.parse_args()
     if bool(args.export) != bool(args.output):
@@ -257,6 +259,13 @@ def main():
     revision, entries = read_catalog(manifest, args.game / 'octo' / 'v1' / '400')
     add_titles(entries, args.game)
     by_name = {item['name']: item for item in entries}
+    if args.download:
+        item = by_name.get(args.download)
+        if not item or not (item['name'].endswith('.awb') or item['kind'] == 'live'):
+            raise ValueError('the selected audio is not in the manifest')
+        if not item['cached']:
+            download(item, args.game)
+        return
     awbs = [item for item in entries if item['name'].endswith('.awb') or item['kind'] == 'live']
     awbs.sort(key=lambda item: item['name'])
     for item in awbs:

@@ -9,7 +9,7 @@ namespace GakuActors {
 using Json = nlohmann::json;
 struct Character { std::string id, name; bool special{}; };
 struct Part { std::string id, name, character, resource; bool head{}; std::string thumbnail,faceResource; };
-struct ModelAssets {std::string character,body,face,hair,factory;};
+struct ModelAssets {std::string character,body,face,hair,factory,costumeId,headId;};
 struct ModelChoice {std::string label,body,face,hair;};
 struct ModelResource {std::string character,kind,resource,source,bundle;};
 struct PreLiveCostume {std::string character,body,head;bool operator==(const PreLiveCostume&)const=default;};
