@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use serde_json::Value;
 
-const SCRIPT: &str = include_str!("music_catalog.py");
+pub(crate) const SCRIPT: &str = include_str!("music_catalog.py");
 const NO_WINDOW: u32 = 0x08000000;
 
-fn python() -> Result<PathBuf,String> {
+pub(crate) fn python() -> Result<PathBuf,String> {
     let mut candidates = Vec::new();
     if let Some(home) = std::env::var_os("USERPROFILE") {
         candidates.push(PathBuf::from(home).join("anaconda3/python.exe"));

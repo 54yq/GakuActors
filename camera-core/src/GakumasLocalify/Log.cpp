@@ -8,6 +8,9 @@
 #include <mutex>
 #endif
 #include <cstdarg>
+#ifdef GKMS_HOSTED
+#include "../host/HostedHost.hpp"
+#endif
 
 #ifndef GKMS_WINDOWS
     #include <android/log.h>
@@ -73,10 +76,16 @@ namespace GakumasLocal::Log {
     }
 
     void Debug(const char* msg) {
+#ifdef GKMS_HOSTED
+        if (!GkmsHosted::DiagnosticsEnabled()) return;
+#endif
         Log(ANDROID_LOG_DEBUG, msg);
     }
 
     void DebugFmt(const char* fmt, ...) {
+#ifdef GKMS_HOSTED
+        if (!GkmsHosted::DiagnosticsEnabled()) return;
+#endif
         GetParamStringResult(result);
         Debug(result.c_str());
     }

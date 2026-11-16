@@ -287,6 +287,7 @@ void TickFreeCameraShortcutBlock(){
     const bool wanted=GakumasLocal::Config::enableFreeCamera&&GakumasLocal::Config::blockFreeCameraShortcuts;
     if(!wanted){if(g_freeInputActive.load(std::memory_order_acquire)||g_freeInputFence.HasLease())StopFreeCameraShortcutBlock();return;}
     if(g_freeInputActive.load(std::memory_order_acquire)){
+        if(!DiagnosticsEnabled())return;
         static auto nextReport=std::chrono::steady_clock::time_point{};const auto now=std::chrono::steady_clock::now();
         if(now>=nextReport){nextReport=now+std::chrono::seconds(5);HostLog(GAKU_LOG_INFO,"Free camera shortcut block: forwarded_window_keys="+std::to_string(g_freeInputWindowKeys.load(std::memory_order_relaxed))+" blocked_unity_queries="+std::to_string(g_freeInputFence.BlockedCount()));}
         return;
@@ -471,8 +472,7 @@ bool getCurrentLodingProgress(int* stepTotal, int* stepCurrent, int* currTotal, 
 // Hosted logging: every plugin diagnostic lands in the loader's private log
 // instead of a per-translation-unit file or stdout.
 void __android_log_write(int prio, const char* tag, const char* msg) {
-    const auto level = prio >= ANDROID_LOG_ERROR ? GAKU_LOG_ERROR :
-        prio == ANDROID_LOG_INFO ? GAKU_LOG_INFO : GAKU_LOG_WARNING;
+    const auto level = prio >= ANDROID_LOG_ERROR ? GAKU_LOG_ERROR : GAKU_LOG_INFO;
     std::string line;
     if (tag && tag[0]) {
         line.append(tag).append(": ");

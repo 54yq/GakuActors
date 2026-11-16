@@ -2,6 +2,7 @@
 use base64::Engine;
 use std::io::Cursor;
 
+#[derive(Clone)]
 pub struct Bitmap {pub width:u32,pub height:u32,pub bgra:Vec<u8>}
 impl Bitmap {
     pub fn fit(&self,max_w:u32,max_h:u32)->Bitmap {

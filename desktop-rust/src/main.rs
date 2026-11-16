@@ -13,6 +13,8 @@ mod pipe;
 mod thumbnail;
 mod music;
 mod preview;
+mod people;
+mod icons;
 
 type Handle = *mut c_void;
 type WndProc = unsafe extern "system" fn(Handle, u32, usize, isize) -> isize;
@@ -77,9 +79,14 @@ extern "system" {
     fn EndPaint(hwnd:Handle,paint:*const PaintStruct)->i32;
     fn FillRect(dc:Handle,rect:*const Rect,brush:Handle)->i32;
     fn InvalidateRect(hwnd:Handle,rect:*const Rect,erase:i32)->i32;
+    fn RedrawWindow(hwnd:Handle,rect:*const Rect,region:Handle,flags:u32)->i32;
     fn DrawTextW(dc:Handle,text:*const u16,count:i32,rect:*mut Rect,format:u32)->i32;
     fn SetTimer(hwnd:Handle,id:usize,ms:u32,callback:*mut c_void)->usize;
     fn KillTimer(hwnd:Handle,id:usize)->i32;
+    fn IsDialogMessageW(hwnd:Handle,msg:*const Msg)->i32;
+    fn DestroyWindow(hwnd:Handle)->i32;
+    fn GetWindowLongPtrW(hwnd:Handle,index:i32)->isize;
+    fn SetWindowLongPtrW(hwnd:Handle,index:i32,value:isize)->isize;
 }
 #[link(name="comctl32")]
 extern "system" { fn InitCommonControlsEx(value:*const InitCommonControls)->i32; }
@@ -93,12 +100,15 @@ extern "system" {
     fn CreateSolidBrush(color:u32)->Handle;
     fn CreatePen(style:i32,width:i32,color:u32)->Handle;
     fn SelectObject(dc:Handle,object:Handle)->Handle;
+    fn SaveDC(dc:Handle)->i32;
+    fn RestoreDC(dc:Handle,saved:i32)->i32;
+    fn IntersectClipRect(dc:Handle,left:i32,top:i32,right:i32,bottom:i32)->i32;
     fn SetTextColor(dc:Handle,color:u32)->u32;
     fn SetBkMode(dc:Handle,mode:i32)->i32;
     fn RoundRect(dc:Handle,left:i32,top:i32,right:i32,bottom:i32,width:i32,height:i32)->i32;
-    fn CreateDIBSection(dc:Handle,info:*const BitmapInfo,usage:u32,bits:*mut *mut c_void,section:Handle,offset:u32)->Handle;
     fn DeleteObject(object:Handle)->i32;
     fn CreateFontW(height:i32,width:i32,esc:i32,orientation:i32,weight:i32,italic:u32,underline:u32,strike:u32,charset:u32,out:u32,clip:u32,quality:u32,pitch:u32,name:*const u16)->Handle;
+    fn StretchDIBits(dc:Handle,x:i32,y:i32,w:i32,h:i32,sx:i32,sy:i32,sw:i32,sh:i32,bits:*const c_void,info:*const BitmapInfo,usage:u32,rop:u32)->i32;
 }
 
 fn wide(s: &str) -> Vec<u16> { std::ffi::OsStr::new(s).encode_wide().chain(once(0)).collect() }
@@ -147,7 +157,8 @@ const DEFAULT_GUI_FONT: i32 = 17;
 static SENDER:OnceLock<mpsc::Sender<Value>>=OnceLock::new();
 static LATEST:OnceLock<Arc<Mutex<Value>>>=OnceLock::new();
 struct ThumbResult {id:String,status:String,bitmap:Option<thumbnail::Bitmap>,head_status:String,head_bitmap:Option<thumbnail::Bitmap>}
-static THUMB:OnceLock<Arc<Mutex<Option<ThumbResult>>>>=OnceLock::new();
+type ThumbnailQueue=Arc<Mutex<std::collections::VecDeque<ThumbResult>>>;
+static THUMB:OnceLock<ThumbnailQueue>=OnceLock::new();
 static SCALE:OnceLock<f64>=OnceLock::new();
 static FONT:OnceLock<usize>=OnceLock::new();
 static HEADING_FONT:OnceLock<usize>=OnceLock::new();
@@ -164,6 +175,7 @@ thread_local! { static APP:RefCell<Option<App>>=const {RefCell::new(None)}; }
 #[derive(Clone,Copy,PartialEq)]
 enum View { People,Actors,Scene,Props,Music }
 struct App {
+    people:people::Workspace,
     hwnd:Handle,status:Handle,left:Handle,right:Handle,view:View,snapshot:Value,
     characters:Vec<String>,presets:Vec<Value>,resources:Vec<Value>,selected_character:String,
     left_rows:Vec<String>,right_rows:Vec<String>,list_view:Option<View>,resource_filter:String,
@@ -204,26 +216,14 @@ unsafe fn choose_audio_path(owner:Handle,name:&str)->Option<std::path::PathBuf> 
     let len=filename.iter().position(|x|*x==0).unwrap_or(filename.len());Some(std::path::PathBuf::from(String::from_utf16_lossy(&filename[..len])))
 }
 impl App {
-    unsafe fn set_picture(picture:Handle,status:Handle,label:&str,bitmap:Option<thumbnail::Bitmap>) {
-        let previous=SendMessageW(picture,0x0172,0,0) as Handle;
-        if !previous.is_null(){DeleteObject(previous);}
-        text(status,label);
-        if let Some(image)=bitmap {
-            let scale=*SCALE.get().unwrap_or(&1.0);let image=image.fit((135.0*scale).max(1.0) as u32,(145.0*scale).max(1.0) as u32);let mut bits=null_mut();
-            let info=BitmapInfo{header:BitmapHeader{size:40,width:image.width as i32,height:-(image.height as i32),planes:1,bits:32,compression:0,image_size:0,xppm:0,yppm:0,used:0,important:0},colors:[0]};
-            let bitmap=CreateDIBSection(null_mut(),&info,0,&mut bits,null_mut(),0);
-            if bitmap.is_null()||bits.is_null(){if !bitmap.is_null(){DeleteObject(bitmap);}text(status,"缩略图显示失败");return;}
-            std::ptr::copy_nonoverlapping(image.bgra.as_ptr(),bits as *mut u8,image.bgra.len());
-            let replaced=SendMessageW(picture,0x0172,0,bitmap as isize) as Handle;
-            if !replaced.is_null(){DeleteObject(replaced);}
-        }
-    }
     unsafe fn thumbnail(&mut self,result:ThumbResult) {
-        if result.id!=self.selected_preset{return;}
-        Self::set_picture(self.picture,self.picture_status,&format!("身体服装：{}",result.status),result.bitmap);
-        Self::set_picture(self.head_picture,self.head_status,&format!("头部组合：{}",result.head_status),result.head_bitmap);
+        self.people.accept_thumbnail(result);
+        if self.view==View::People {self.render_people();}
     }
     unsafe fn render(&mut self) {
+        if self.view==View::People && !*MUSIC_ONLY.get().unwrap_or(&false) {self.render_people();return;}
+        self.hide_people();
+        if !*MUSIC_ONLY.get().unwrap_or(&false) {layout_legacy(self.hwnd);}
         let admitted=self.snapshot.get("admitted").and_then(Value::as_bool).unwrap_or(false);
         if let Some(revision)=self.reset_wait_revision {
             if self.selected_actor==self.reset_wait_actor && self.snapshot["pose_reset_actor"].as_i64()==Some(self.reset_wait_actor)
@@ -461,6 +461,7 @@ impl App {
         }
     }
     unsafe fn command(&mut self,id:u16,notification:u16) {
+        if self.view==View::People && self.people_command(id,notification) {return;}
         if matches!(id,101..=105|109..=116|140|209)&&SENDER.get().is_none(){text(self.status,"尚未连接游戏插件，操作未提交。");return;}
         match id {
             140=>send(json!({"version":1,"action":"free_camera","enabled":!self.snapshot["free_camera_active"].as_bool().unwrap_or(false)})),
@@ -595,32 +596,47 @@ impl App {
 fn start_worker(hwnd:Handle,mut client:pipe::Client) {
     let (tx,rx)=mpsc::channel::<Value>();let _=SENDER.set(tx);
     let latest=Arc::new(Mutex::new(Value::Null));let _=LATEST.set(latest.clone());
-    let thumbs=Arc::new(Mutex::new(None));let _=THUMB.set(thumbs.clone());let target=hwnd as usize;
-    std::thread::spawn(move||{let mut pending:Option<String>=None;let mut held:Option<Value>=None;loop {
-        let mut request=if let Some(value)=held.take(){value}else{match rx.recv_timeout(Duration::from_millis(750)){
-            Ok(v)=>v,
-            Err(mpsc::RecvTimeoutError::Timeout)=>if pending.is_some(){json!({"version":1,"action":"thumbnail_status"})}else{json!({"version":1,"action":"snapshot"})},
-            Err(_)=>break}};
-        if request["action"]=="move" {while let Ok(next)=rx.try_recv(){
-            if next["action"]=="move"&&next["instance"]==request["instance"] {request=next;}else{held=Some(next);break;}
-        }}
-        if request["action"]=="load_thumbnail"{pending=request["preset_id"].as_str().map(str::to_owned);}
+    let thumbs=Arc::new(Mutex::new(std::collections::VecDeque::new()));let _=THUMB.set(thumbs.clone());let target=hwnd as usize;
+    std::thread::spawn(move||{let mut pending:Option<(String,String,std::time::Instant)>=None;let mut queued=std::collections::VecDeque::new();let mut pending_icons=(String::new(),String::new());let mut icon_reader=None;let mut icon_reader_failed=false;loop {
+        // A gallery has several independent icons. Finish each request before
+        // issuing the next one so a later selection cannot overwrite its PNG.
+        let mut request=if pending.is_some(){
+            if let Some((_,key,since))=&pending {if since.elapsed()>Duration::from_secs(5){
+                if let Ok(mut v)=thumbs.lock(){v.push_back(ThumbResult{id:key.clone(),status:"图片读取超时，请重试".into(),bitmap:None,head_status:"图片读取超时，请重试".into(),head_bitmap:None});}pending=None;
+            }}
+            if pending.is_some(){std::thread::sleep(Duration::from_millis(60));json!({"version":1,"action":"thumbnail_status"})}else{continue}
+        }else if let Some(value)=queued.pop_front(){value}else{match rx.recv_timeout(Duration::from_millis(750)){
+            Ok(v)=>v,Err(mpsc::RecvTimeoutError::Timeout)=>json!({"version":1,"action":"snapshot"}),Err(_)=>break}};
+        if request["action"]=="move"{while let Ok(next)=rx.try_recv(){if next["action"]=="move"&&next["instance"]==request["instance"]{request=next;}else{queued.push_back(next);break;}}}
+        if request["action"]=="load_thumbnail" {if let Some(id)=request["preset_id"].as_str(){pending=Some((id.into(),format!("preset:{id}"),std::time::Instant::now()));}}
+        if request["action"]=="load_part_thumbnail" {if let (Some(kind),Some(id))=(request["kind"].as_str(),request["part_id"].as_str()){let key=format!("part:{kind}:{id}");pending=Some((key.clone(),key,std::time::Instant::now()));}}
+        if matches!(request["action"].as_str(),Some("load_thumbnail"|"load_part_thumbnail")) {
+            let names=latest.lock().ok().map(|v|icons::names(&v["snapshot"],&request)).unwrap_or_default();
+            let complete=if request["action"]=="load_thumbnail"{!names.0.is_empty()&&!names.1.is_empty()}else if request["kind"]=="head"{!names.1.is_empty()}else{!names.0.is_empty()};
+            if complete {if let Some((body,head))=icons::cached_pair(&names,&mut icon_reader,&mut icon_reader_failed){
+                if let Some((_,key,_))=pending.take(){if let Ok(mut v)=thumbs.lock(){v.push_back(ThumbResult{id:key,status:"系统模型预览图 · 预缓存".into(),bitmap:body,head_status:"系统模型预览图 · 预缓存".into(),head_bitmap:head});}}
+                unsafe{PostMessageW(target as Handle,WM_SNAPSHOT,0,0);}continue;
+            }}
+        }
         match client.request(&request) {
             Ok(mut reply)=>{
-                if request["action"]=="load_thumbnail"&&reply["accepted"]!=true {
-                    if let Some(id)=pending.take(){if let Ok(mut v)=thumbs.lock(){*v=Some(ThumbResult{id,status:"请求未被接受".into(),bitmap:None,head_status:"请求未被接受".into(),head_bitmap:None});}}
+                if matches!(request["action"].as_str(),Some("load_thumbnail"|"load_part_thumbnail")){pending_icons=icons::names(&reply["snapshot"],&request);}
+                if matches!(request["action"].as_str(),Some("load_thumbnail"|"load_part_thumbnail"))&&reply["accepted"]!=true {
+                    if let Some((_,id,_))=pending.take(){if let Ok(mut v)=thumbs.lock(){v.push_back(ThumbResult{id,status:"请求未被接受，请重新读取目录".into(),bitmap:None,head_status:"请求未被接受，请重新读取目录".into(),head_bitmap:None});}}
                 }
                 if let Some(t)=reply.get("thumbnail").and_then(Value::as_object) {
                     let id=t.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
                     let mut status=t.get("status").and_then(Value::as_str).unwrap_or("").to_owned();
                     let data=t.get("data").and_then(Value::as_str).unwrap_or("");
-                    if pending.as_deref()==Some(id.as_str())&&!id.is_empty()&&status!="读取中" {
-                        let decoded=if data.is_empty(){None}else{match thumbnail::decode(data){Ok(image)=>Some(image),Err(_)=>{status="缩略图解码失败".into();None}}};
+                    if pending.as_ref().is_some_and(|(wire,_,_)|wire==&id)&&!id.is_empty()&&status!="读取中"&&t.get("head_status").and_then(Value::as_str)!=Some("读取中") {
+                        let mut decoded=if data.is_empty(){None}else{match thumbnail::decode(data){Ok(image)=>Some(image),Err(_)=>{status="缩略图解码失败".into();None}}};
                         let mut head_status=t.get("head_status").and_then(Value::as_str).unwrap_or("头部图未返回").to_owned();
                         let head_data=t.get("head_data").and_then(Value::as_str).unwrap_or("");
-                        let head_decoded=if head_data.is_empty(){None}else{match thumbnail::decode(head_data){Ok(image)=>Some(image),Err(_)=>{head_status="头部图片解码失败".into();None}}};
-                        if let Ok(mut v)=thumbs.lock(){*v=Some(ThumbResult{id,status,bitmap:decoded,head_status,head_bitmap:head_decoded});}
-                        pending=None;
+                        let mut head_decoded=if head_data.is_empty(){None}else{match thumbnail::decode(head_data){Ok(image)=>Some(image),Err(_)=>{head_status="头部图片解码失败".into();None}}};
+                        icons::fill(&mut decoded,&pending_icons.0,&mut status,&mut icon_reader,&mut icon_reader_failed);
+                        icons::fill(&mut head_decoded,&pending_icons.1,&mut head_status,&mut icon_reader,&mut icon_reader_failed);
+                        let (_,key,_)=pending.take().unwrap();
+                        if let Ok(mut v)=thumbs.lock(){v.push_back(ThumbResult{id:key,status,bitmap:decoded.map(|b|b.fit(400,400)),head_status,head_bitmap:head_decoded.map(|b|b.fit(400,400))});}
                     }
                 }
                 if let Some(map)=reply.as_object_mut(){map.remove("thumbnail");}
@@ -671,6 +687,24 @@ unsafe fn layout_music(hwnd:Handle) {
         let child=GetDlgItem(hwnd,id);if !child.is_null(){MoveWindow(child,p(x),p(y),p(cw.max(1)),p(ch.max(1)),1);}
     }
 }
+unsafe fn layout_legacy(hwnd:Handle) {
+    if GetDlgItem(hwnd,201).is_null(){return;}
+    let (w,h)=music_client_size(hwnd);if w<1||h<1{return;}
+    let scale=*SCALE.get().unwrap_or(&1.0);let p=|n:i32|(n as f64*scale).round() as i32;
+    let lower=h-290;let upper_h=(lower-168).max(150);
+    for (id,x,y,cw,ch) in [
+        (330,240,25,w-280,32),(331,240,59,w-280,24),
+        (201,250,170,310,upper_h-35),(320,620,228,w-660,(upper_h-120).max(40)),
+        (109,620,lower-65,155,36),(334,250,lower+20,w-300,30),
+        (112,250,lower+117,115,36),(113,375,lower+117,115,36),
+        (302,760,lower+64,185,25),(303,940,lower+62,72,29),(304,1018,lower+62,72,29),(305,1096,lower+62,72,29),
+        (114,1180,lower+59,92,36),(124,1280,lower+59,100,36),
+        (316,760,lower+121,168,25),(216,940,lower+118,72,29),(125,1018,lower+115,100,36),
+        (122,1128,lower+115,115,36),(123,1250,lower+115,115,36),
+        (115,250,lower+66,135,36),(116,395,lower+66,135,36),(314,250,lower+125,150,25),
+        (209,400,lower+121,330,220),(120,745,lower+118,125,36),(315,240,h-40,w-280,30)
+    ] {let child=GetDlgItem(hwnd,id);if !child.is_null(){MoveWindow(child,p(x),p(y),p(cw.max(1)),p(ch.max(1)),1);}}
+}
 unsafe fn paint_window(hwnd:Handle) {
     let scale=*SCALE.get().unwrap_or(&1.0);let p=|n:i32|(n as f64*scale).round() as i32;
     let rect=|x,y,w,h|Rect{left:p(x),top:p(y),right:p(x+w),bottom:p(y+h)};
@@ -678,13 +712,15 @@ unsafe fn paint_window(hwnd:Handle) {
     if !dc.is_null() {
         let mut client=Rect{left:0,top:0,right:0,bottom:0};GetClientRect(hwnd,&mut client);
         FillRect(dc,&client,*BACK_BRUSH.get().unwrap_or(&0) as Handle);
+        if people::active(){people::paint(dc,hwnd);EndPaint(hwnd,&paint);return;}
         if *MUSIC_ONLY.get().unwrap_or(&false) {
             let (w,h)=music_client_size(hwnd);let (left,right,player)=music_panels(w,h);
             for r in [rect(left.0,left.1,left.2,left.3),rect(right.0,right.1,right.2,right.3),rect(player.0,player.1,player.2,player.3)] {rounded(dc,r,rgb(255,255,255),rgb(226,229,237),p(18));}
             EndPaint(hwnd,&paint);return;
         }
-        let sidebar=CreateSolidBrush(rgb(23,34,57));FillRect(dc,&rect(0,0,210,900),sidebar);DeleteObject(sidebar);
-        for r in [rect(230,150,350,390),rect(596,150,806,390),rect(230,558,1172,236)] {rounded(dc,r,rgb(255,255,255),rgb(220,227,238),p(13));}
+        let (w,h)=music_client_size(hwnd);let lower=h-290;
+        let sidebar=CreateSolidBrush(rgb(23,34,57));FillRect(dc,&rect(0,0,210,h),sidebar);DeleteObject(sidebar);
+        for r in [rect(230,150,350,lower-168),rect(596,150,w-620,lower-168),rect(230,lower,w-254,236)] {rounded(dc,r,rgb(255,255,255),rgb(220,227,238),p(13));}
         SetBkMode(dc,1);SetTextColor(dc,rgb(255,255,255));
         if let Some(font)=HEADING_FONT.get(){SelectObject(dc,*font as Handle);}
         let mut label=rect(25,35,160,32);DrawTextW(dc,wide("GAKUACTORS").as_ptr(),-1,&mut label,0x24);
@@ -696,10 +732,11 @@ unsafe fn paint_window(hwnd:Handle) {
     EndPaint(hwnd,&paint);
 }
 unsafe fn draw_button(item:&DrawItem) {
+    if people::draw_card(item){return;}
     let id=item.ctl_id as u16;let disabled=item.state&4!=0;let pressed=item.state&1!=0;
     let nav=(106..=108).contains(&id)||id==126||id==132;let selected=nav&&NAV_SELECTED.load(Ordering::Relaxed)==id;
     let music=*MUSIC_ONLY.get().unwrap_or(&false);
-    let primary=matches!(id,104|110|125)||(music&&matches!(id,134|135));
+    let primary=matches!(id,104|110|125|411|457)||(music&&matches!(id,134|135));
     let (bg,border,fg)=if disabled {(rgb(239,242,247),rgb(225,230,237),rgb(157,168,183))}
         else if nav {if selected {(rgb(49,67,96),rgb(49,67,96),rgb(255,255,255))}else{(rgb(23,34,57),rgb(23,34,57),rgb(185,199,219))}}
         else if primary {if music {(rgb(89,76,181),rgb(89,76,181),rgb(255,255,255))}else{(rgb(83,109,221),rgb(83,109,221),rgb(255,255,255))}}
@@ -755,14 +792,14 @@ unsafe extern "system" fn wndproc(hwnd: Handle, msg: u32, wp: usize, lp: isize) 
 }
 unsafe fn wndproc_inner(hwnd: Handle, msg: u32, wp: usize, lp: isize) -> isize {
     match msg {
-        0x0005=>{if *MUSIC_ONLY.get().unwrap_or(&false)&&wp!=1 {layout_music(hwnd);InvalidateRect(hwnd,null(),1);}0},
-        0x0024=>{if *MUSIC_ONLY.get().unwrap_or(&false)&&lp!=0 {
+        0x0005=>{if wp!=1{if *MUSIC_ONLY.get().unwrap_or(&false){layout_music(hwnd);}else{APP.with(|cell|if let Ok(guard)=cell.try_borrow(){if let Some(app)=guard.as_ref(){if app.view==View::People{app.layout_people();}else{layout_legacy(hwnd);}}});}RedrawWindow(hwnd,null(),null_mut(),0x0001|0x0004|0x0080);}0},
+        0x0024=>{if lp!=0 {
             let info=&mut *(lp as *mut MinMaxInfo);let scale=*SCALE.get().unwrap_or(&1.0);
-            info.min_track.x=(1000.0*scale).round() as i32;info.min_track.y=(650.0*scale).round() as i32;0
+            info.min_track.x=((if *MUSIC_ONLY.get().unwrap_or(&false){1000.0}else{1440.0})*scale).round() as i32;info.min_track.y=((if *MUSIC_ONLY.get().unwrap_or(&false){650.0}else{900.0})*scale).round() as i32;0
         }else{DefWindowProcW(hwnd,msg,wp,lp)}},
         0x0014=>1,
         0x000f=>{paint_window(hwnd);0},
-        0x002b=>{if lp!=0 {let item=&*(lp as *const DrawItem);if item.ctl_type==2 {if *MUSIC_ONLY.get().unwrap_or(&false)&&item.ctl_id==201 {draw_music_row(item);}else{draw_resource_row(item);}}else{draw_button(item);}1}else{0}},
+        0x002b=>{if lp!=0 {let item=&*(lp as *const DrawItem);let saved=SaveDC(item.dc);IntersectClipRect(item.dc,item.rect.left,item.rect.top,item.rect.right,item.rect.bottom);if item.ctl_type==2 {if *MUSIC_ONLY.get().unwrap_or(&false)&&item.ctl_id==201 {draw_music_row(item);}else{draw_resource_row(item);}}else if !people::draw_card(item){draw_button(item);}if saved!=0{RestoreDC(item.dc,saved);}1}else{0}},
         0x0138=>{
             let dc=wp as Handle;let id=GetDlgCtrlID(lp as Handle);
             let music=*MUSIC_ONLY.get().unwrap_or(&false);
@@ -818,6 +855,7 @@ unsafe fn wndproc_inner(hwnd: Handle, msg: u32, wp: usize, lp: isize) -> isize {
             }});0
         }
         WM_TIMER=>{
+            if wp==2 {APP.with(|cell|if let Ok(mut guard)=cell.try_borrow_mut(){if let Some(app)=guard.as_mut(){if app.view==View::People{app.render_people();}}});return 0;}
             if wp==1 {APP.with(|cell|if let Ok(mut guard)=cell.try_borrow_mut(){if let Some(app)=guard.as_mut(){
                 if app.view==View::Music {
                     let pos=app.preview.position().unwrap_or(0);let len=app.preview.length;
@@ -831,7 +869,8 @@ unsafe fn wndproc_inner(hwnd: Handle, msg: u32, wp: usize, lp: isize) -> isize {
             APP.with(|cell|if let Ok(mut guard)=cell.try_borrow_mut(){if let Some(app)=guard.as_mut(){
                 let update=LATEST.get().and_then(|data|data.lock().ok().map(|v|v.clone()));
                 if let Some(reply)=update {if let Some(snapshot)=reply.get("snapshot"){if *snapshot!=app.snapshot {app.snapshot=snapshot.clone();app.render();}}}
-                if let Some(thumb)=THUMB.get().and_then(|value|value.lock().ok().and_then(|mut v|v.take())) {app.thumbnail(thumb);}
+                let thumbs=THUMB.get().and_then(|value|value.lock().ok().map(|mut v|v.drain(..).collect::<Vec<_>>())).unwrap_or_default();
+                for thumb in thumbs {app.thumbnail(thumb);}
                 if let Some(result)=MUSIC_RESULT.get().and_then(|value|value.lock().ok().and_then(|mut v|v.take())) {
                     app.music_busy=false;
                     match result {
@@ -874,6 +913,13 @@ unsafe fn control(parent: Handle, instance: Handle, class: &str, label: &str,
 fn main() {
     let args:Vec<_>=std::env::args_os().skip(1).collect();
     let music_only=args.iter().any(|x|x=="--music-only");let _=MUSIC_ONLY.set(music_only);
+    if let Some(parts)=args.windows(2).find(|p|p[0]=="--model-icons-prefetch") {
+        if let Err(error)=icons::prefetch(std::path::Path::new(&parts[1]),args.iter().any(|x|x=="--download")){eprintln!("{error}");std::process::exit(1);}return;
+    }
+    if let Some(parts)=args.windows(3).find(|p|p[0]=="--model-icon-check") {
+        let result=icons::Reader::start(std::path::Path::new(&parts[1])).and_then(|mut reader|reader.read(&parts[2].to_string_lossy()));
+        match result {Ok(image)=>println!("Official local icon decoded: {}x{}",image.width,image.height),Err(error)=>{eprintln!("{error}");std::process::exit(1);}}return;
+    }
     if args.iter().any(|x|x=="--music-volume-get") {println!("{}",preview::load_volume());return;}
     if let Some(parts)=args.windows(2).find(|p|p[0]=="--music-volume-set") {
         let value=parts[1].to_string_lossy().parse::<u32>();
@@ -945,7 +991,7 @@ fn main() {
         if RegisterClassW(&class) == 0 { return; }
         let title = wide(if music_only {"GakuActors · 乐库"} else {"GakuActors · 场景资源管理（测试版）"});
         let w=(1440.0*scale).round() as i32;let h=(900.0*scale).round() as i32;
-        let hwnd = CreateWindowExW(0, class_name.as_ptr(), title.as_ptr(), if music_only {WS_OVERLAPPEDWINDOW|0x02000000}else{WS_OVERLAPPEDWINDOW & !0x00050000},
+        let hwnd = CreateWindowExW(0, class_name.as_ptr(), title.as_ptr(), WS_OVERLAPPEDWINDOW|0x02000000,
             (sw-w)/2, (sh-h)/2, w, h, null_mut(), null_mut(), instance, null_mut());
         if hwnd.is_null() { return; }
         control(hwnd,instance,"BUTTON","人物与预设",20,135,170,44,0,106);
@@ -1041,8 +1087,9 @@ fn main() {
             text(GetDlgItem(hwnd,134),"导出歌曲");
         }
         let _=MUSIC_RESULT.set(Mutex::new(None));
+        if !music_only {people::create_controls(hwnd,instance);}
         let player=preview::Player::new();SendMessageW(volume,0x0405,1,player.volume as isize);
-        APP.with(|cell|*cell.borrow_mut()=Some(App{hwnd,status,left,right,view:if music_only {View::Music}else{View::People},snapshot:Value::Null,characters:Vec::new(),presets:Vec::new(),resources:Vec::new(),left_rows:Vec::new(),right_rows:Vec::new(),list_view:None,resource_filter:String::new(),selected_character:String::new(),selected_preset:String::new(),selected_resource:None,actors:Vec::new(),actor_labels:Vec::new(),actor,selected_actor:0,selected_reference:0,parts:[body,face,hair],part_items:std::array::from_fn(|_|Vec::new()),name,position:[px,py,pz],reset_wait_revision:None,reset_wait_actor:0,stage,picture,picture_status,head_picture,head_status,edit_id:String::new(),cross_character:false,editing:false,stage_choice:0,stage_initialized:false,songs:Vec::new(),music_visible:Vec::new(),music_rows:Vec::new(),music_filter:String::new(),music_selected:String::new(),music_busy:false,music_notice:"正在读取游戏歌曲。".into(),preview:player,preview_pending:None,preview_alive:Arc::new(std::sync::atomic::AtomicBool::new(true)),preview_seek_drag:false,volume_dirty:false}));
+        APP.with(|cell|*cell.borrow_mut()=Some(App{people:people::Workspace::default(),hwnd,status,left,right,view:if music_only {View::Music}else{View::People},snapshot:Value::Null,characters:Vec::new(),presets:Vec::new(),resources:Vec::new(),left_rows:Vec::new(),right_rows:Vec::new(),list_view:None,resource_filter:String::new(),selected_character:String::new(),selected_preset:String::new(),selected_resource:None,actors:Vec::new(),actor_labels:Vec::new(),actor,selected_actor:0,selected_reference:0,parts:[body,face,hair],part_items:std::array::from_fn(|_|Vec::new()),name,position:[px,py,pz],reset_wait_revision:None,reset_wait_actor:0,stage,picture,picture_status,head_picture,head_status,edit_id:String::new(),cross_character:false,editing:false,stage_choice:0,stage_initialized:false,songs:Vec::new(),music_visible:Vec::new(),music_rows:Vec::new(),music_filter:String::new(),music_selected:String::new(),music_busy:false,music_notice:"正在读取游戏歌曲。".into(),preview:player,preview_pending:None,preview_alive:Arc::new(std::sync::atomic::AtomicBool::new(true)),preview_seek_drag:false,volume_dirty:false}));
         APP.with(|cell|if let Some(app)=cell.borrow_mut().as_mut(){app.render();});
         if music_only {APP.with(|cell|if let Some(app)=cell.borrow_mut().as_mut(){app.command(133,0);});}
         if let Ok(client)=pipe::Client::from_args(){start_worker(hwnd,client);}
@@ -1050,6 +1097,6 @@ fn main() {
         if music_only {SetTimer(hwnd,1,250,null_mut());}
         let mut msg: Msg = std::mem::zeroed();
         loop { let result=GetMessageW(&mut msg,null_mut(),0,0); if result<=0 { break; }
-            TranslateMessage(&msg); DispatchMessageW(&msg); }
+            if IsDialogMessageW(hwnd,&msg)==0 {TranslateMessage(&msg); DispatchMessageW(&msg);} }
     }
 }

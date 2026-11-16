@@ -11,6 +11,7 @@ using ActorEntryCallback = void (*)(void* userData, void* actor);
 
 // Same process-creation baseline as the loader's startup timing messages.
 unsigned long long ProcessUptimeMs();
+bool DiagnosticsEnabled();
 
 // Registers this plugin's before-phase participant on the game's actor update.
 // The loader owns the only detour on that entry; the callback never calls the

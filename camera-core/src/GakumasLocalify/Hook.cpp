@@ -2777,11 +2777,13 @@ namespace GakumasLocal::HookMain {
     void HostedActorEntryBefore(void*, void* actor) {
         // Bounded evidence that the shared entry reaches this plugin before the
         // game original: first three frames, then a rare heartbeat.
-        static std::atomic<uint64_t> invocations{0};
-        const auto ordinal = invocations.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (ordinal <= 3 || ordinal % 600 == 0) {
-            Log::InfoFmt("[Hosted] actor before-phase #%llu actor=%p",
-                static_cast<unsigned long long>(ordinal), actor);
+        if (GkmsHosted::DiagnosticsEnabled()) {
+            static std::atomic<uint64_t> invocations{0};
+            const auto ordinal = invocations.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (ordinal <= 3 || ordinal % 600 == 0) {
+                Log::InfoFmt("[Hosted] actor before-phase #%llu actor=%p",
+                    static_cast<unsigned long long>(ordinal), actor);
+            }
         }
         CampusActorController_LateUpdate_Pre(actor);
     }

@@ -196,10 +196,12 @@ public:
         if(!props) {
             const char* stages[]{"游戏原生摄影场景","通用 Live 舞台（实验）","初星舞台（实验）","中庭舞台（日中）"};
             ImGui::SetNextItemWidth(-1);
+            ImGui::BeginDisabled(!s.admitted);
             if(ImGui::BeginCombo("下次摄影背景",stages[(s.stageChoice>=0&&s.stageChoice<4)?s.stageChoice:0])) {
                 for(int i=0;i<4;++i)if(ImGui::Selectable(stages[i],s.stageChoice==i))commands.push_back({Action::SelectStage,{},i});
                 ImGui::EndCombo();
             }
+            ImGui::EndDisabled();
             if(!s.stageStatus.empty())ImGui::TextWrapped("%s",s.stageStatus.c_str());
             ImGui::TextDisabled("选择后在下一次摄影背景载入时生效，非立即替换。");
             bool solid=s.cameraColorEnabled;ImGui::BeginDisabled(!s.resourceControls);
@@ -214,7 +216,9 @@ public:
             ImGui::EndDisabled();ImGui::EndDisabled();
             ImGui::TextDisabled("相机底色需要配合隐藏背景节点；退出时尝试恢复。");
         }
+        ImGui::BeginDisabled(!s.admitted);
         if(ImGui::Button("扫描当前场景资源"))commands.push_back({Action::ScanResources});
+        ImGui::EndDisabled();
         if(!s.resourceStatus.empty())ImGui::TextWrapped("%s",s.resourceStatus.c_str());
         ImGui::TextDisabled(props?"角色下匹配的道具节点":"当前场景节点；人物、碰撞和系统节点受保护");
         if(!props) {
@@ -237,7 +241,8 @@ public:
         ImGui::TextDisabled("勾选隐藏，取消勾选恢复；仅影响扫描确认的节点。");
     }
     void DrawActors(const UiSnapshot& s) {
-        if(character_.empty()&&!s.catalog.characters.empty())character_=s.catalog.characters.front().id;
+        const auto characterChoices=PreLiveCharacterChoices(s.catalog,s.presets);
+        if(character_.empty()&&!characterChoices.empty())character_=characterChoices.front().id;
         if(std::none_of(s.actors.begin(),s.actors.end(),[&](const auto& a){return a.instance==primary_;}))primary_=s.actors.empty()?0:s.actors.front().instance;
         ImGui::TextUnformatted("场景人物管理");ImGui::SameLine();ImGui::TextDisabled("GakuActors · 独立插件");
         bool enabled=s.mutationsEnabled;ImGui::BeginDisabled(!s.admitted||s.busy||s.playing||s.faulted);
@@ -259,16 +264,17 @@ public:
         const float leftWidth=columns?ImGui::GetContentRegionAvail().x*.29f:0;
         if(ImGui::BeginChild("人物目录",ImVec2(leftWidth,columns?350.0f:140.0f),true)) {
             ImGui::TextUnformatted("人物");
-            for(const auto& c:s.catalog.characters) {
+            for(const auto& c:characterChoices) {
                 if(search_[0]&&c.name.find(search_)==std::string::npos&&c.id.find(search_)==std::string::npos)continue;
                 const auto text=c.name+(c.special?" · 特殊人物":"")+"##char_"+c.id;
                 if(ImGui::Selectable(text.c_str(),character_==c.id)){character_=c.id;selection_.clear();editor_=false;}
             }
-            if(s.catalog.characters.empty())ImGui::TextWrapped("目录就绪后显示可选人物，包括原生特殊人物。");
+            if(characterChoices.empty())ImGui::TextWrapped("尚无已保存人物；进入拍摄或 Live 场景后读取人物目录。");
         }
         ImGui::EndChild();if(columns)ImGui::SameLine();
         if(ImGui::BeginChild("人物预设",ImVec2(0,columns?350.0f:330.0f),true)) {
-            const auto* c=FindCharacter(s.catalog,character_);
+            const auto found=std::find_if(characterChoices.begin(),characterChoices.end(),[&](const auto& value){return value.id==character_;});
+            const auto* c=found==characterChoices.end()?nullptr:&*found;
             ImGui::TextUnformatted(c?c->name.c_str():"人物预设");
             const auto rawBodies=ResourceChoices(s.catalog,character_,"body"),rawFaces=ResourceChoices(s.catalog,character_,"face"),rawHair=ResourceChoices(s.catalog,character_,"hair");
             ImGui::TextDisabled("已发现模型：身体 %d · 脸 %d · 头发 %d",static_cast<int>(rawBodies.size()),static_cast<int>(rawFaces.size()),static_cast<int>(rawHair.size()));
@@ -277,6 +283,7 @@ public:
                 Preset p;p.character=character_;p.name=c?c->name+" · 自定义":"自定义";
                 bool formal=false;
                 for(const auto& def:s.catalog.defaults)if(def.character==character_){p=def;p.name=(c?c->name:character_)+" · 自定义";formal=true;break;}
+                if(!formal)for(const auto& saved:s.presets)if(saved.character==character_){p=saved;p.name=(c?c->name:character_)+" · 自定义";formal=true;break;}
                 if(!formal) {
                     if(!rawBodies.empty())p.bodyAsset=rawBodies.front().resource;
                     if(rawFaces.size()==1)p.faceAsset=rawFaces.front().resource;
@@ -289,7 +296,7 @@ public:
             auto presetRow=[&](const Preset& p) {
                 if(p.character!=character_)return;
                 ImGui::PushID(p.id.c_str());
-                if(ImGui::Selectable((p.name+"##preset").c_str(),selection_==p.id)){selection_=p.id;editor_=false;commands.push_back({Action::LoadThumbnail,p});}
+                if(ImGui::Selectable((p.name+"##preset").c_str(),selection_==p.id)){selection_=p.id;editor_=false;if(s.admitted)commands.push_back({Action::LoadThumbnail,p});}
                 if(selection_==p.id) {
                     ImGui::TextDisabled("身体 / 服装图");
                     if(thumbnailId_==p.id) {ui_thumbnail::Draw(thumbnailBody_);ImGui::TextWrapped("%s",thumbnailBodyStatus_.c_str());
@@ -305,7 +312,7 @@ public:
                     ImGui::TextWrapped("头部：%s",headLabel.c_str());
                 } else ImGui::TextDisabled("使用原生人物组合");
                 if(ImGui::Button(p.builtin?"另存为预设":"编辑"))BeginEdit(p,p.builtin);
-                ImGui::SameLine();ImGui::BeginDisabled(!s.mutationsEnabled||!s.runtime||s.busy||s.playing||!primary_);
+                ImGui::SameLine();ImGui::BeginDisabled(!s.admitted||!s.mutationsEnabled||!s.runtime||s.busy||s.playing||!primary_);
                 if(ImGui::Button("加入场景"))commands.push_back({Action::Spawn,p,primary_});
                 ImGui::EndDisabled();
                 if(!p.builtin){ImGui::SameLine();if(ImGui::Button("删除预设")){selectedDelete_=p.id;ImGui::OpenPopup("删除人物预设");}}
@@ -379,7 +386,9 @@ public:
             ImGui::EndCombo();
         }
         ImGui::Spacing();ImGui::Separator();ImGui::Text("当前场景人物（%d）",static_cast<int>(s.actors.size()));
+        ImGui::BeginDisabled(!s.admitted);
         if(ImGui::Button("扫描人物显隐和场景资源"))commands.push_back({Action::ScanResources});
+        ImGui::EndDisabled();
         for(const auto& a:s.actors) {
             ImGui::PushID(a.instance);ImGui::TextWrapped("%s",a.name.c_str());
             for(const auto& r:s.resources)if(r.kind==SceneResourceKind::ActorModel&&r.instance==a.instance) {

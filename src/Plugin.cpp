@@ -13,6 +13,7 @@
 #include "DesktopProtocol.hpp"
 #include "DesktopTransport.hpp"
 #include "FreeCamera.hpp"
+#include "GakuDiagnostics.hpp"
 #include <atomic>
 #include <mutex>
 #include <cmath>
@@ -33,7 +34,7 @@ struct State {
     std::string legacyThumbnailId,legacyThumbnailData,legacyThumbnailStatus,legacyHeadData,legacyHeadStatus;
     uint64_t legacyThumbnailRevision{};
     std::mutex mutex;std::deque<Command> commands;
-    std::atomic<bool> ready{},stopped{};bool catalogRead{},catalogRequested{},sceneRequested{},wasAdmitted{};
+    std::atomic<bool> ready{},stopped{};bool catalogRead{},catalogRequested{},sceneRequested{},wasAdmitted{},diagnostics{};
     SceneGate gate;
     int resourceScene{},stageChoice{};bool stageAttempted{};std::string resourceActiveScene;
     std::vector<Preset> modelQueue;size_t modelCursor{},modelFailures{};
@@ -63,6 +64,7 @@ template<class T> bool Query(State& s,const char* name,T& value) {
     value=candidate;return true;
 }
 static void Log(State& s,const std::string& message,GakuLogLevel level=GAKU_LOG_INFO) {
+    if(level==GAKU_LOG_INFO&&!s.diagnostics)return;
     if(s.log.write)s.log.write(s.log.context,level,("[GakuActors] "+message).c_str());
 }
 // Only adjacent placement updates for the same actor may coalesce. A reset,
@@ -123,13 +125,14 @@ static GakuStatus ActivateImpl(const GakuHostApi* host,void** output) {
     if(!host||!output||host->abiVersion!=1||host->structSize<sizeof(*host)||!host->queryService)return GAKU_E_INVALID_ARGUMENT;
     auto& s=state;s.host=*host;
     if(!Query(s,GAKU_SERVICE_LOG,s.log)||!Query(s,GAKU_SERVICE_RUNTIME,s.runtime)||!s.runtime.getGameAssembly)return GAKU_E_UNAVAILABLE;
+    s.diagnostics=GakuDiagnostics::Enabled(s.runtime.gameRoot);
     Query(s,GAKU_SERVICE_DESKTOP_UI,s.desktop);Query(s,GAKU_SERVICE_DESKTOP_WINDOW,s.window);
     Query(s,GAKU_SERVICE_HOTKEYS,s.hotkeys);Query(s,GAKU_SERVICE_PATHS,s.paths);
     Query(s,GAKU_SERVICE_HOOKS,s.hooks);Query(s,GAKU_SERVICE_MAIN_THREAD,s.mainThread);
     s.stageHook.Configure(&s.native,&s.gate,s.hooks,s.mainThread);
     s.preLiveHook.Configure(&s.native,s.hooks,s.mainThread);
     s.freeCamera.Configure(&s.native,s.hooks,s.mainThread);
-    s.native.trace=[](const char* text){Log(state,text);};
+    s.native.trace=s.diagnostics?+[](const char* text){Log(state,text);}:nullptr;
     const auto root=ConfigRoot(s);if(!root.empty()){s.store.SetFile(root/L"actor_presets.json");s.stageStore.SetFile(root/L"stage_choice.json");}
     if(!s.stageStore.Load(s.stageChoice))s.snapshot.stageStatus="摄影背景设置不可读或损坏，已保留原文件";
     s.snapshot.stageChoice=s.stageChoice;
@@ -165,11 +168,25 @@ static void ActorTickImpl(void* context,void* actor,float) {
     s.gate.Observe(scene.owner,scene.handle,scene.active,MonotonicMs());
 }
 static void TickImpl(void* context,float) {
-    auto& s=*static_cast<State*>(context);if(s.stopped||!s.ready.load(std::memory_order_acquire))return;
+    auto& s=*static_cast<State*>(context);if(s.stopped)return;
     std::deque<Command> commands;
     {std::lock_guard<std::mutex> lock(s.mutex);commands.swap(s.commands);}
     UiSnapshot next;
     {std::lock_guard<std::mutex> lock(s.mutex);next=s.snapshot;}
+    if(!s.ready.load(std::memory_order_acquire)) {
+        // Storage is independent of IL2CPP. Never defer scene commands to a later scene.
+        for(const auto& command:commands) {
+            switch(command.action) {
+            case Action::Reload:s.store.Load();break;
+            case Action::Save:s.store.Save(command.preset);break;
+            case Action::DeletePreset:s.store.Remove(command.preset.id);break;
+            default:next.notice="游戏尚未就绪，场景操作未执行";break;
+            }
+        }
+        next.runtime=false;next.admitted=false;next.presets=s.store.presets;
+        next.storeNotice=s.store.notice;next.writable=s.store.Writable();
+        std::lock_guard<std::mutex> lock(s.mutex);s.snapshot=std::move(next);return;
+    }
     next.runtime=true;
     const auto now=std::chrono::steady_clock::now();
     auto publish=[&]{
@@ -191,7 +208,7 @@ static void TickImpl(void* context,float) {
             if(s.cameraHandoff.request)s.cameraHandoff.request(0);s.cameraHandoffRequested=false;
             Log(s,"Free camera ended; Motion camera handoff released");
         }
-        if(s.freeCamera.Active()&&now-s.lastFreeCameraLog>=std::chrono::seconds(5)){Log(s,s.freeCamera.Diagnostics());s.lastFreeCameraLog=now;}
+        if(s.diagnostics&&s.freeCamera.Active()&&now-s.lastFreeCameraLog>=std::chrono::seconds(5)){Log(s,s.freeCamera.Diagnostics());s.lastFreeCameraLog=now;}
         const int currentScene=next.admitted?s.gate.Scene():0;
         if(s.resourceScene!=currentScene||s.resourceActiveScene!=(next.admitted?activeScene:std::string{})){
             if(s.resourceScene&&(s.freeCamera.Active()||s.freeCameraPending)){
@@ -556,10 +573,12 @@ static void TickImpl(void* context,float) {
             s.catalogRequested=false;
             // Explicit, admitted-scene diagnostics describe metadata and read
             // existing models only. Never run cache updates to learn a type.
-            try{s.native.DiagnoseContracts();}catch(const std::exception& e){Log(s,std::string("Diagnostic contracts unavailable: ")+e.what(),GAKU_LOG_WARNING);}
-            try{s.native.DiagnoseActorManagerRelations();}catch(const std::exception& e){Log(s,std::string("Diagnostic manager relationships unavailable: ")+e.what(),GAKU_LOG_WARNING);}
-            try{s.native.DiagnoseLiveBindings();}catch(const std::exception& e){Log(s,std::string("Diagnostic live bindings unavailable: ")+e.what(),GAKU_LOG_WARNING);}
-            try{s.native.DiagnoseActors();}catch(const std::exception& e){Log(s,std::string("Diagnostic actors unavailable: ")+e.what(),GAKU_LOG_WARNING);}
+            if(s.diagnostics){
+                try{s.native.DiagnoseContracts();}catch(const std::exception& e){Log(s,std::string("Diagnostic contracts unavailable: ")+e.what(),GAKU_LOG_WARNING);}
+                try{s.native.DiagnoseActorManagerRelations();}catch(const std::exception& e){Log(s,std::string("Diagnostic manager relationships unavailable: ")+e.what(),GAKU_LOG_WARNING);}
+                try{s.native.DiagnoseLiveBindings();}catch(const std::exception& e){Log(s,std::string("Diagnostic live bindings unavailable: ")+e.what(),GAKU_LOG_WARNING);}
+                try{s.native.DiagnoseActors();}catch(const std::exception& e){Log(s,std::string("Diagnostic actors unavailable: ")+e.what(),GAKU_LOG_WARNING);}
+            }
             Log(s,"Catalog request BEGIN (explicit user action, admitted scene)");
             try{auto catalog=s.native.ScanCatalog();catalog.revision=next.catalog.revision+1;next.catalog=std::move(catalog);s.catalogRead=true;Log(s,"Game master catalog read: "+std::to_string(next.catalog.characters.size())+" characters, "+std::to_string(next.catalog.bodies.size())+" bodies, "+std::to_string(next.catalog.heads.size())+" heads");
                 s.native.StartResourceScan(next.catalog);
@@ -620,14 +639,12 @@ static void DesktopImpl(void* context) {
     ImGui::EndDisabled();
     if(!s.musicWindowNotice.empty())ImGui::TextWrapped("%s",s.musicWindowNotice.c_str());
     ImGui::TextWrapped("%s",snapshot.admissionNotice.c_str());
-    ImGui::BeginDisabled(!snapshot.admitted);
     if(ImGui::Button("打开独立资源窗口")) {
         const auto path=DesktopExecutable();
         if(path.empty())s.nativeWindowNotice="无法定位独立窗口程序";
         else if(s.nativeWindow.Start(path,[&s](const std::string& request){return DesktopMessage(s,request);},s.nativeWindowNotice))s.nativeWindowNotice="独立窗口已启动";
     }
     ImGui::SameLine();if(ImGui::Button(s.dialogOpen?"收起模型界面":"模型界面")){s.dialogOpen=!s.dialogOpen;s.preLiveDialogOpen=false;}
-    ImGui::EndDisabled();
     ImGui::SameLine();ImGui::BeginDisabled(!snapshot.runtime);
     if(ImGui::Button(s.preLiveDialogOpen?"收起 Live 入场前换装":"Live 入场前换装")){s.preLiveDialogOpen=!s.preLiveDialogOpen;s.dialogOpen=false;}
     ImGui::EndDisabled();
@@ -636,8 +653,7 @@ static void DesktopImpl(void* context) {
     if(s.dialogOpen) {
         ImGui::Separator();
         ImGui::TextUnformatted("场景资源管理 · 模型界面");
-        if(snapshot.admitted)s.ui.Draw(snapshot);
-        else ImGui::TextDisabled("进入拍摄或 Live 场景后可使用模型界面。");
+        s.ui.Draw(snapshot);
     }
     if(s.preLiveDialogOpen) {
         s.preLiveUiSeenMs.store(MonotonicMs(),std::memory_order_release);
@@ -699,7 +715,7 @@ static void Shutdown(void* context) noexcept {
 extern "C" GAKU_PLUGIN_EXPORT GakuStatus GakuPlugin_Query(uint32_t version,uint32_t bytes,GakuPluginDescriptor* output) {
     if(version!=GAKU_ABI_VERSION)return GAKU_E_VERSION;
     if(!output)return GAKU_E_INVALID_ARGUMENT;if(bytes<sizeof(*output))return GAKU_E_SIZE;
-    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景资源管理","0.4.0-native-test",
+    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景资源管理","0.5.0-native-test",
         GakuActors::Activate,GakuActors::RuntimeReady,GakuActors::Tick,GakuActors::ActorTick,GakuActors::Desktop,GakuActors::Shutdown};
     return GAKU_OK;
 }

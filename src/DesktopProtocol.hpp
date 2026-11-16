@@ -11,7 +11,7 @@ constexpr std::size_t kMaxRequestBytes=64*1024;
 constexpr int kVersion=1;
 inline Json Snapshot(const UiSnapshot& s) {
     Json out{{"version",kVersion},{"admitted",s.admitted},{"status",s.admissionNotice},
-        {"notice",s.notice},{"store_notice",s.storeNotice},{"catalog_notice",s.catalog.notice},{"resource_catalog_notice",s.catalog.resourceNotice},
+        {"notice",s.notice},{"store_notice",s.storeNotice},{"catalog_notice",s.catalog.notice},{"catalog_revision",s.catalog.revision},{"resource_catalog_notice",s.catalog.resourceNotice},
         {"resource_status",s.resourceStatus},{"stage_status",s.stageStatus},{"prelive_model_status",s.preLiveApplyStatus+" "+s.preLiveModelStatus},
         {"pose_reset_revision",s.poseResetRevision},{"pose_reset_actor",s.poseResetActor},
         {"pose_reset_position",{s.poseResetPosition[0],s.poseResetPosition[1],s.poseResetPosition[2]}},
@@ -23,12 +23,25 @@ inline Json Snapshot(const UiSnapshot& s) {
         {"stage_choice",s.stageChoice},{"characters",Json::array()},{"presets",Json::array()},
         {"bodies",Json::array()},{"heads",Json::array()},{"resources",Json::array()},
         {"models",Json::array()},{"actors",Json::array()},{"scene_resources",Json::array()},{"live_models",Json::array()}};
-    for(const auto& c:s.catalog.characters)out["characters"].push_back({{"id",c.id},{"name",c.name},{"special",c.special}});
+    for(const auto& c:PreLiveCharacterChoices(s.catalog,s.presets))out["characters"].push_back({{"id",c.id},{"name",c.name},{"special",c.special}});
     for(const auto& p:s.catalog.defaults){auto v=PresetJson(p);v["builtin"]=true;out["presets"].push_back(std::move(v));}
     for(const auto& p:s.presets){auto v=PresetJson(p);v["builtin"]=false;out["presets"].push_back(std::move(v));}
-    auto parts=[&](const auto& values,const char* key){for(const auto& p:values)out[key].push_back({{"id",p.id},{"name",p.name},{"character",p.character},{"resource",p.resource},{"thumbnail",p.thumbnail}});};
+    auto parts=[&](const auto& values,const char* key){for(const auto& p:values)out[key].push_back({{"id",p.id},{"name",p.name},{"character",p.character},{"resource",p.resource},{"face_resource",p.faceResource},{"thumbnail",p.thumbnail}});};
     parts(s.catalog.bodies,"bodies");parts(s.catalog.heads,"heads");
+    // Saved IDs remain editable before the game master catalog is available.
+    for(const auto& p:s.presets)for(const auto& entry:{std::pair{"bodies",p.body},std::pair{"heads",p.head}}) {
+        if(entry.second.empty())continue;
+        auto& list=out[entry.first];
+        if(std::none_of(list.begin(),list.end(),[&](const auto& part){return part["id"]==entry.second&&part["character"]==p.character;}))
+            list.push_back({{"id",entry.second},{"name",entry.second},{"character",p.character},{"resource",""},{"face_resource",""},{"thumbnail",""}});
+    }
     for(const auto& r:s.catalog.resources)out["resources"].push_back({{"character",r.character},{"kind",r.kind},{"resource",r.resource},{"source",r.source}});
+    for(const auto& p:s.presets)for(const auto& entry:{std::pair{"body",p.bodyAsset},std::pair{"face",p.faceAsset},std::pair{"hair",p.hairAsset}}) {
+        if(entry.second.empty())continue;
+        auto& list=out["resources"];
+        if(std::none_of(list.begin(),list.end(),[&](const auto& r){return r["character"]==p.character&&r["kind"]==entry.first&&r["resource"]==entry.second;}))
+            list.push_back({{"character",p.character},{"kind",entry.first},{"resource",entry.second},{"source","saved_preset"}});
+    }
     for(const auto& m:s.catalog.models)out["models"].push_back({{"character",m.character},{"body",m.body},{"face",m.face},{"hair",m.hair},{"factory",m.factory}});
     for(const auto& m:s.liveModels)out["live_models"].push_back({{"instance",m.instance},{"name",m.name},{"body",m.body},{"face",m.face},{"hair",m.hair},{"status",m.status}});
     for(const auto& a:s.actors)out["actors"].push_back({{"instance",a.instance},{"scene",a.scene},{"unique",a.uniqueId},{"name",a.name},{"preset",a.preset},{"owned",a.owned},{"pose_supported",a.identityValid},{"bodyAsset",a.bodyAsset},{"faceAsset",a.faceAsset},{"hairAsset",a.hairAsset},{"modelRestorable",a.modelRestorable},{"position",{a.position[0],a.position[1],a.position[2]}}});
@@ -65,6 +78,17 @@ inline bool Decode(const std::string& bytes,const UiSnapshot& snapshot,Command& 
         } else if(action=="save_preset") {
             if(!j.contains("preset"))return false;Preset p;std::string error;
             if(!ReadPreset(j["preset"],p,error)||!ValidatePreset(p,error)||p.builtin)return false;command={Action::Save,p};
+        } else if(action=="load_part_thumbnail") {
+            // Resolve an actual catalogue row; the desktop cannot supply a texture
+            // name, path, URL or arbitrary Unity method to execute.
+            if(!j.contains("kind")||!j["kind"].is_string()||!j.contains("part_id")||!j["part_id"].is_string())return false;
+            const auto kind=j["kind"].get<std::string>(),id=j["part_id"].get<std::string>();
+            if((kind!="body"&&kind!="head")||!TextValid(id,256))return false;
+            const auto* part=FindPart(kind=="body"?snapshot.catalog.bodies:snapshot.catalog.heads,id);
+            if(!part)return false;
+            Preset p;p.id="part:"+kind+":"+id;p.character=part->character;
+            if(kind=="body")p.body=id;else p.head=id;
+            command={Action::LoadThumbnail,std::move(p)};
         } else if(action=="spawn"||action=="delete_preset"||action=="load_thumbnail") {
             if(!j.contains("preset_id")||!j["preset_id"].is_string())return false;
             const auto id=j["preset_id"].get<std::string>();if(!TextValid(id,96))return false;

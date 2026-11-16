@@ -225,7 +225,7 @@ ModelReadiness InspectBuiltModel(void* actor,const ModelAssets& expected,bool ve
         const bool ready=bones>0&&Bool(part,"get_rendererActive");
         m.bodyPart|=kind=="body"&&asset==expected.body&&ready;m.facePart|=kind=="face"&&asset==expected.face&&ready;m.hairPart|=kind=="hair"&&asset==expected.hair&&ready;
         m.nativeBones+=bones;m.nativeMaterials+=mc;m.nativeRenderers+=rc+(skin.Get()?1:0);
-        if(verbose)Trace(("Spawn native model evidence: asset="+asset+" kind="+kind+" bone_entries="+std::to_string(bones)+" renderers="+std::to_string(rc)+" material_infos="+std::to_string(mc)+" vl_skinning="+std::to_string(skin.Get()!=nullptr)+" ready="+std::to_string(ready)).c_str());
+        if(verbose&&trace)Trace(("Spawn native model evidence: asset="+asset+" kind="+kind+" bone_entries="+std::to_string(bones)+" renderers="+std::to_string(rc)+" material_infos="+std::to_string(mc)+" vl_skinning="+std::to_string(skin.Get()!=nullptr)+" ready="+std::to_string(ready)).c_str());
     }
     return m;
 }

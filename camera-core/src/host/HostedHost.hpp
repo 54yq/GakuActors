@@ -41,6 +41,7 @@ extern bool g_servicesReady;
 
 // activate: copy every service table the hosted target depends on.
 bool QueryServices(const GakuHostApi* host);
+bool DiagnosticsEnabled();
 void HostLog(GakuLogLevel level, const std::string& message);
 std::filesystem::path LocalRoot();
 void* GameAssembly();

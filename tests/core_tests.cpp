@@ -135,6 +135,14 @@ int main() {
     check(!desktop_protocol::Decode(request({{"version",1},{"action","spawn"},{"preset_id","unknown"},{"instance",-4}}),wire,decoded));
     check(desktop_protocol::Decode(request({{"version",1},{"action","load_thumbnail"},{"preset_id",normal.id}}),wire,decoded)&&decoded.action==Action::LoadThumbnail);
     check(!desktop_protocol::Decode(request({{"version",1},{"action","load_thumbnail"},{"preset_id","unknown"}}),wire,decoded));
+    wire.catalog.bodies.push_back({"body-1","制服","hski","body-asset",false,"native-body-icon"});
+    wire.catalog.heads.push_back({"head-1","发型","hski","hair-asset",true,"native-head-icon","face-asset"});
+    check(desktop_protocol::Snapshot(wire)["heads"][0]["face_resource"]=="face-asset");
+    check(desktop_protocol::Decode(request({{"version",1},{"action","load_part_thumbnail"},{"kind","body"},{"part_id","body-1"}}),wire,decoded)&&decoded.action==Action::LoadThumbnail&&decoded.preset.body=="body-1"&&decoded.preset.id=="part:body:body-1");
+    check(desktop_protocol::Decode(request({{"version",1},{"action","load_part_thumbnail"},{"kind","head"},{"part_id","head-1"}}),wire,decoded)&&decoded.preset.head=="head-1"&&decoded.preset.body.empty());
+    check(!desktop_protocol::Decode(request({{"version",1},{"action","load_part_thumbnail"},{"kind","body"},{"part_id","head-1"}}),wire,decoded));
+    check(!desktop_protocol::Decode(request({{"version",1},{"action","load_part_thumbnail"},{"kind","texture"},{"part_id","arbitrary-name"}}),wire,decoded));
+    check(!desktop_protocol::Decode(request({{"version",1},{"action","load_part_thumbnail"},{"kind","body"},{"part_id",42}}),wire,decoded));
     check(desktop_protocol::Decode(request({{"version",1},{"action","move"},{"instance",-4},{"position",{1,2,3}}}),wire,decoded));
     check(!desktop_protocol::Decode(request({{"version",1},{"action","move"},{"instance",-4},{"position",{1,2,10001}}}),wire,decoded));
     check(desktop_protocol::Decode(request({{"version",1},{"action","hide_resource"},{"kind",1},{"scene",-7},{"instance",-12},{"generation",9},{"hidden",true}}),wire,decoded)&&decoded.resource.name=="道具");

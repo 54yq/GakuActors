@@ -7,6 +7,7 @@
 #ifdef GKMS_HOSTED
 
 #include "HostedHost.hpp"
+#include "GakuDiagnostics.hpp"
 #include "HostedBridge.hpp"
 #include "CameraWriteProvider.hpp"
 #include "LanguageConsumer.hpp"
@@ -41,6 +42,8 @@ GkmsHosted::CameraRenderProvider g_cameraRenders;
 namespace GkmsHosted {
 Services g_services{};
 bool g_servicesReady = false;
+bool g_diagnosticsEnabled = false;
+bool DiagnosticsEnabled() { return g_diagnosticsEnabled; }
 
 unsigned long long ProcessUptimeMs() {
     FILETIME created{}, exited{}, kernel{}, user{};
@@ -56,6 +59,7 @@ unsigned long long ProcessUptimeMs() {
 }
 
 void HostLog(GakuLogLevel level, const std::string& message) {
+    if (level == GAKU_LOG_INFO && !g_diagnosticsEnabled) return;
     if (g_services.log.write) {
         g_services.log.write(g_services.log.context, level, message.c_str());
         return;
@@ -91,6 +95,7 @@ bool QueryServices(const GakuHostApi* host) {
         query(GAKU_SERVICE_HOTKEYS, sizeof(g_services.hotkeys), &g_services.hotkeys) &&
         query(GAKU_SERVICE_ACTOR_ENTRY, sizeof(g_services.actorEntry), &g_services.actorEntry);
     if (!required) return false;
+    g_diagnosticsEnabled = GakuDiagnostics::Enabled(g_services.runtime.gameRoot);
     // The panel is optional in the sense that a headless host is still valid;
     // without it Localify keeps translating and simply has no window.
     query(GAKU_SERVICE_DESKTOP_UI, sizeof(g_services.desktopUi), &g_services.desktopUi);
@@ -465,6 +470,7 @@ void Tick(void*, float) {
     // Detour evidence, reported only when it moves: a run whose counters stay at
     // zero has no text path to translate, which is a different failure from a
     // text path that runs but never matches a key.
+    if (!GkmsHosted::DiagnosticsEnabled()) return;
     static std::chrono::steady_clock::time_point nextReport{};
     static unsigned long long reportedSeen = 0;
     static unsigned long long reportedI18nSeen = 0;
