@@ -1,0 +1,4 @@
+UnityPy==1.25.4
+numpy==2.0.2
+Pillow==11.3.0
+pycryptodome==3.23.0

@@ -9,6 +9,9 @@ const NO_WINDOW: u32 = 0x08000000;
 
 pub(crate) fn python() -> Result<PathBuf,String> {
     let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() { candidates.push(dir.join("runtime/python.exe")); }
+    }
     if let Some(home) = std::env::var_os("USERPROFILE") {
         candidates.push(PathBuf::from(home).join("anaconda3/python.exe"));
     }
@@ -20,10 +23,26 @@ pub(crate) fn python() -> Result<PathBuf,String> {
     Err("找不到带 PyCryptodome 的 Python，无法解析乐库。".into())
 }
 
+fn resolve_game_path(exe_dir: &Path, path: &Path) -> Result<PathBuf,String> {
+    let joined = if path.is_absolute() { path.to_path_buf() } else { exe_dir.join(path) };
+    std::path::absolute(joined).map_err(|e| format!("无法解析游戏目录：{e}"))
+}
+
 pub fn game_root() -> Result<PathBuf,String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let root = exe.parent().and_then(Path::parent).and_then(Path::parent)
-        .ok_or("无法定位游戏目录")?.to_path_buf();
+    let exe_dir = exe.parent().ok_or("无法定位程序目录")?;
+    let configured = std::fs::read_to_string(exe_dir.join("game-root.txt")).ok()
+        .map(|v|v.trim().trim_start_matches('\u{feff}').to_owned()).filter(|v|!v.is_empty());
+    let root = if let Some(path) = std::env::var_os("GAKUACTORS_GAME_ROOT").filter(|v| !v.is_empty()) {
+        resolve_game_path(exe_dir, Path::new(&path))?
+    } else if let Some(path) = configured {
+        resolve_game_path(exe_dir, Path::new(&path))?
+    } else {
+        let standard = exe_dir.parent().ok_or("无法定位游戏目录")?;
+        if standard.join("gakumas.exe").is_file() { standard.to_path_buf() } else {
+            standard.parent().ok_or("无法定位游戏目录")?.to_path_buf()
+        }
+    };
     if !root.join("octo/pdb/400").is_dir() { return Err("游戏资源清单不存在。".into()); }
     Ok(root)
 }
@@ -132,6 +151,14 @@ pub fn export_at(root: &Path, name: &str, output: &Path) -> Result<(),String> {
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test] fn relative_game_path_tracks_the_executable_after_move() {
+        for game in [r"C:\Old Location\Game", r"D:\Moved Game"] {
+            let root=PathBuf::from(game);
+            let resolved=resolve_game_path(&root.join("GakuActors"),Path::new("..")).unwrap();
+            assert_eq!(resolved,root);
+            assert_eq!(resolve_game_path(&root.join("GakuActors"),&root).unwrap(),root);
+        }
+    }
     #[test] fn cache_states_and_deletion_are_independent() {
         let root=std::env::temp_dir().join(format!("gaku-music-state-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         let digest="0123456789abcdef0123456789abcdef";

@@ -1,0 +1,200 @@
+{
+  "schema": 1,
+  "files": [
+    {
+      "path": "tools/AssetRipper/AssetRipper.GUI.Free.exe",
+      "bytes": 130120704,
+      "sha256": "58bb4c6a78507d77ea115db236ae7286b097979fba7f77aa247c16a471499fff"
+    },
+    {
+      "path": "tools/AssetRipper/capstone.dll",
+      "bytes": 5596672,
+      "sha256": "f03321188a1615d044314b1183dcd9a7ffda09286c31c369d109165d4892dcbb"
+    },
+    {
+      "path": "tools/AssetStudio/AssetStudio.dll",
+      "bytes": 582656,
+      "sha256": "8aaa4e8cf09baf5caaca1f5e86c420fde076f1ecb88cb73fed4fb79de41018a8"
+    },
+    {
+      "path": "tools/AssetStudio/AssetStudio.PInvoke.dll",
+      "bytes": 8704,
+      "sha256": "88e98a1e9210e25790bb0acae39e0f1f0d87cef7dfe9bca9de721b79cfcb3d20"
+    },
+    {
+      "path": "tools/AssetStudio/AssetStudioFBXWrapper.dll",
+      "bytes": 35328,
+      "sha256": "0991fc199c6d807ed8ba17173b546b47d4b74bca594a665b929bec4c73a5bdd2"
+    },
+    {
+      "path": "tools/AssetStudio/AssetStudioModCLI.exe",
+      "bytes": 110080,
+      "sha256": "c52590110140dc70f77169ba0deb3455cbfe78989ff51d35983821d3484ac929"
+    },
+    {
+      "path": "tools/AssetStudio/AssetStudioUtility.dll",
+      "bytes": 475648,
+      "sha256": "1eb1b11065b1910fe2693ff8e0278b45c208d984b835b9df8cd3a3bbdb910c15"
+    },
+    {
+      "path": "tools/AssetStudio/GakumasModelFbx.exe",
+      "bytes": 14336,
+      "sha256": "1203beba66ba405d89cdf8e5039d44272ed377c0d01eb8236de06f5679821f0d"
+    },
+    {
+      "path": "tools/AssetStudio/K4os.Compression.LZ4.dll",
+      "bytes": 75264,
+      "sha256": "6dade79664f48a163d6864c84a0a6c5c55b856bdfaf34ba187c87f18f9167238"
+    },
+    {
+      "path": "tools/AssetStudio/Microsoft.Bcl.AsyncInterfaces.dll",
+      "bytes": 26384,
+      "sha256": "881d98c0d56edcba53c18eb5df0a334333cb647f47ba42049784258778f34596"
+    },
+    {
+      "path": "tools/AssetStudio/Microsoft.Bcl.Numerics.dll",
+      "bytes": 21256,
+      "sha256": "e2dbbd5d5c8dc42310582b4cf302a1e51f8a01ecf3a6e3179c7557f9f4a6632c"
+    },
+    {
+      "path": "tools/AssetStudio/Mono.Cecil.dll",
+      "bytes": 363008,
+      "sha256": "c41bdb9ffd3c5f6e17d2382c1012d73703e035e3f1100245fdd4e08c8dc6eb5b"
+    },
+    {
+      "path": "tools/AssetStudio/Mono.Cecil.Mdb.dll",
+      "bytes": 43520,
+      "sha256": "570a437dea0271d1d5c8b7d6a408b0b2635bdb0e8b8d5051878f3e7fca087f89"
+    },
+    {
+      "path": "tools/AssetStudio/Mono.Cecil.Pdb.dll",
+      "bytes": 90112,
+      "sha256": "50a1a1a79dc86fcfb8b51249b5325a10dd93d193c52999cf6775d25030a4e606"
+    },
+    {
+      "path": "tools/AssetStudio/Mono.Cecil.Rocks.dll",
+      "bytes": 29696,
+      "sha256": "842e09959084eda733aab1a5354d7af79e29594f4d8b91c8792103e5c755ed9b"
+    },
+    {
+      "path": "tools/AssetStudio/Newtonsoft.Json.dll",
+      "bytes": 711952,
+      "sha256": "e1e27af7b07eeedf5ce71a9255f0422816a6fc5849a483c6714e1b472044fa9d"
+    },
+    {
+      "path": "tools/AssetStudio/runtimes/win-x64/native/AssetStudioFBXNative.dll",
+      "bytes": 7664128,
+      "sha256": "8791b2ec5bb13431843892af49b72b54fd9dd3b099a712adb205587d69e9c546"
+    },
+    {
+      "path": "tools/AssetStudio/runtimes/win-x64/native/fmod.dll",
+      "bytes": 1875968,
+      "sha256": "7c5948d83d11406fc1a95ace03943a9b0429bf2eaa3b1ad949f51de02fbdd9c6"
+    },
+    {
+      "path": "tools/AssetStudio/runtimes/win-x64/native/ooz.dll",
+      "bytes": 158208,
+      "sha256": "e068102a05b35c28f20515c8cac5ad79f986b8846af70fd2a8f3eb54ba14f8a0"
+    },
+    {
+      "path": "tools/AssetStudio/runtimes/win-x64/native/Texture2DDecoderNative.dll",
+      "bytes": 250880,
+      "sha256": "bafa5c34b3007e108361e8af2a03f85e1e3c4649d571175b733e4fbbb5da0af9"
+    },
+    {
+      "path": "tools/AssetStudio/runtimes/win-x86/native/AssetStudioFBXNative.dll",
+      "bytes": 6640640,
+      "sha256": "720ba0521011b98f357867b84801e0324bcfab7a71e15b3da24ab0ca35f45909"
+    },
+    {
+      "path": "tools/AssetStudio/runtimes/win-x86/native/fmod.dll",
+      "bytes": 1570816,
+      "sha256": "30bb4299a9c6d91aaf8add2544f8e4f9fab51085e6496637de786f94f37d0286"
+    },
+    {
+      "path": "tools/AssetStudio/runtimes/win-x86/native/ooz.dll",
+      "bytes": 127488,
+      "sha256": "dbc8f28af08d35f68acee0eac2306225614f8f798cd77d1c0879dc2a962a86ac"
+    },
+    {
+      "path": "tools/AssetStudio/runtimes/win-x86/native/Texture2DDecoderNative.dll",
+      "bytes": 198656,
+      "sha256": "348119704ce4421e1badd35d772c547432d778b9d2e15dbe8d8a2f5d8e52e35e"
+    },
+    {
+      "path": "tools/AssetStudio/SixLabors.Fonts.dll",
+      "bytes": 748544,
+      "sha256": "22c97036e656b45aafca995c0ca0ac4ffafee8c7052106c0db17aed2088e0332"
+    },
+    {
+      "path": "tools/AssetStudio/SixLabors.ImageSharp.dll",
+      "bytes": 1722880,
+      "sha256": "69588c5a315ecb02e27fc841465d62c8b41c91ffb0b40c19582bade8fac61451"
+    },
+    {
+      "path": "tools/AssetStudio/SixLabors.ImageSharp.Drawing.dll",
+      "bytes": 182272,
+      "sha256": "78a8b15523c26d7eb585b85f7329be3ce08c840664c5119c1b9bb4562487db28"
+    },
+    {
+      "path": "tools/AssetStudio/System.Buffers.dll",
+      "bytes": 23816,
+      "sha256": "2d78d770c9cb997199154ae8c018b9f1d1efbc86729f7264dde6dbad2a12cac3"
+    },
+    {
+      "path": "tools/AssetStudio/System.IO.Pipelines.dll",
+      "bytes": 84752,
+      "sha256": "eea5dee4914b04801e1541f2ad5a14b4317a30d07760e55d5d37aec03097c47e"
+    },
+    {
+      "path": "tools/AssetStudio/System.Memory.dll",
+      "bytes": 145200,
+      "sha256": "d5e8e4866f9cfa66f7765660f84b210198893e55335487afe5ebda342c0e913d"
+    },
+    {
+      "path": "tools/AssetStudio/System.Numerics.Vectors.dll",
+      "bytes": 110344,
+      "sha256": "20c2fa81b8c70d651099d762954f285fd4f942e63b2d7217c145dab8d4b2f4c9"
+    },
+    {
+      "path": "tools/AssetStudio/System.Runtime.CompilerServices.Unsafe.dll",
+      "bytes": 19256,
+      "sha256": "08cbd7278b66f1e68425a82d4b97181a4130d93e3dd91831407aba7212ccdacf"
+    },
+    {
+      "path": "tools/AssetStudio/System.Text.Encoding.CodePages.dll",
+      "bytes": 758664,
+      "sha256": "93da6a111239a3804da2efd6a6faa92bf5cbfe3b2b079ad3c04be643179f4088"
+    },
+    {
+      "path": "tools/AssetStudio/System.Text.Encodings.Web.dll",
+      "bytes": 79656,
+      "sha256": "e779d7127d1f270edaf85d9d5516bd51b1d71618c4df5a23c65befcaffcd44a1"
+    },
+    {
+      "path": "tools/AssetStudio/System.Text.Json.dll",
+      "bytes": 726840,
+      "sha256": "53463df8e4d8f3d7b20d58d6ec75e2591df64b9c4bcf0f85c07403154f6d32c3"
+    },
+    {
+      "path": "tools/AssetStudio/System.Threading.Tasks.Extensions.dll",
+      "bytes": 25984,
+      "sha256": "4f81ffd0dc7204db75afc35ea4291769b07c440592f28894260eea76626a23c6"
+    },
+    {
+      "path": "tools/AssetStudio/System.ValueTuple.dll",
+      "bytes": 25232,
+      "sha256": "e905d102585b22c6df04f219af5cbdbfa7bc165979e9788b62df6dcc165e10f4"
+    },
+    {
+      "path": "tools/AssetStudio/Texture2DDecoderWrapper.dll",
+      "bytes": 10752,
+      "sha256": "243cfb717d00007e30e658b2669935b97ff63be40afaff1ca6dadd432dd882ad"
+    },
+    {
+      "path": "tools/AssetStudio/ZstdSharp.dll",
+      "bytes": 428032,
+      "sha256": "654aa27c8f70c821d2d8402db95c313a8451b2a2264bf51d7ffc9e195befe22a"
+    }
+  ]
+}

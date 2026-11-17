@@ -189,6 +189,9 @@ struct NativeApiTestAccess {
     }
     template<class Check> static void Run(Check check) {
         check(NativeApi::SupportedProp("Root_Microphone","Prop_Microphone"));
+        check(NativeApi::SupportedPropGeometry("Root_Hknesuitcase","Prop_Hknesuitcase","Geo_Hknesuitcase"));
+        check(!NativeApi::SupportedPropGeometry("Root_Microphone","Prop_Microphone","Geo_Hknesuitcase"));
+        check(!NativeApi::SupportedPropGeometry("Root_Hknesuitcase","Prop_Hknesuitcase","Geo_Body"));
         check(NativeApi::SupportedProp("Root_Penlight","Prop_Penlight"));
         check(!NativeApi::SupportedProp("Root_Body","Prop_Body"));
         check(!NativeApi::SupportedProp("Root_Microphone","Prop_Body"));

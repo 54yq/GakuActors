@@ -49,6 +49,9 @@ int main() {
     CatalogStartupRead busyStartup;check(!busyStartup.Due(true,false,10));
     check(!busyStartup.Due(true,true,800)&&!busyStartup.Due(true,false,1000));
     check(!busyStartup.Due(true,false,1749)&&busyStartup.Due(true,false,1750));
+    check(!MayReadDesktopCatalog(false,false));
+    check(MayReadDesktopCatalog(true,false));
+    check(MayReadDesktopCatalog(false,true));
     check(ShouldObservePreLive(false,1000,2000));
     check(!ShouldObservePreLive(true,1000,2000));
     check(!ShouldObservePreLive(false,0,2000));

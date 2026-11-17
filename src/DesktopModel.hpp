@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 namespace GakuActors {
+inline bool MayReadDesktopCatalog(bool admitted,bool preLiveDetected) { return admitted||preLiveDetected; }
 inline bool ShouldObservePreLive(bool admitted,uint64_t uiSeen,uint64_t now) {
     return !admitted&&uiSeen&&now>=uiSeen&&now-uiSeen<=3000;
 }

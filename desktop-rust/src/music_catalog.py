@@ -239,7 +239,7 @@ def download(item, game):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--game', type=Path, default=Path(r'G:\Game\Normal\gakumas'))
+    parser.add_argument('--game', type=Path, required=True, help='game root directory')
     parser.add_argument('--manifest', type=Path, help='specific octocacheevai; default: newest numeric version')
     parser.add_argument('--json', type=Path, help='write an inventory to this path')
     parser.add_argument('--filter', default='', help='case-insensitive substring in resource name')
@@ -306,7 +306,7 @@ def main():
         streams = hca_streams(source_path)
         if len(streams) != 1:
             raise ValueError('multi-stream AWB needs explicit stream selection')
-        decoder = args.game / 'GakuLoader' / 'plugins' / 'GakuActors.Vgmstream' / 'vgmstream-cli.exe'
+        decoder = args.game / 'GakuActors' / 'GakuActors.Vgmstream' / 'vgmstream-cli.exe'
         if not decoder.is_file():
             found = shutil.which('vgmstream-cli')
             if not found:

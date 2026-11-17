@@ -11,7 +11,6 @@
 #include "PreLiveLoadHook.hpp"
 #include "StageChoiceStore.hpp"
 #include "DesktopProtocol.hpp"
-#include "DesktopTransport.hpp"
 #include "DesktopListener.hpp"
 #include "FreeCamera.hpp"
 #include "GakuDiagnostics.hpp"
@@ -19,6 +18,7 @@
 #include "ResourceOwnership.hpp"
 #include <atomic>
 #include <mutex>
+#include <memory>
 #include <cmath>
 
 #ifdef GKMS_ACTORS_INTEGRATED
@@ -31,8 +31,7 @@ struct State {
     GakuDesktopUiService desktop{};GakuDesktopWindowService window{};GakuHotkeyService hotkeys{};
     GakuHookService hooks{};GakuMainThreadService mainThread{};StageLoadHook stageHook;PreLiveLoadHook preLiveHook;StageChoiceStore stageStore;
     GakuPathsV1 paths{};NativeApi native;PresetStore store;ActorUi ui;UiSnapshot snapshot;FreeCamera freeCamera;
-    DesktopTransport nativeWindow;DesktopListener desktopListener;std::string nativeWindowNotice;
-    HANDLE musicWindow{};std::string musicWindowNotice;
+    DesktopListener desktopListener;
     std::string thumbnailId,thumbnailData,thumbnailStatus,thumbnailHeadData,thumbnailHeadStatus;
     std::string legacyThumbnailId,legacyThumbnailData,legacyThumbnailStatus,legacyHeadData,legacyHeadStatus;
     uint64_t legacyThumbnailRevision{};
@@ -106,13 +105,20 @@ static std::string DesktopMessage(State& s,const std::string& request) {
         return result.dump();
     } catch(...) {return {};}
 }
-static std::wstring DesktopExecutable() {
-    HMODULE module{};
-    if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCWSTR>(&DesktopExecutable),&module))return {};
-    std::wstring path(32768,L'\0');const DWORD n=GetModuleFileNameW(module,path.data(),static_cast<DWORD>(path.size()));
-    if(!n||n>=path.size())return {};path.resize(n);
-    return (std::filesystem::path(path).parent_path()/L"GakuActors.Desktop.exe").wstring();
+static std::string DesktopSessionMessage(State& s,bool& resourceSession,const std::string& input) {
+    auto result=DesktopMessage(s,input);
+    const auto request=Json::parse(input,nullptr,false),reply=Json::parse(result,nullptr,false);
+    if(request.is_object()&&reply.is_object()&&reply.value("accepted",false)) {
+        const auto action=request.value("action",std::string{});
+        if((action=="enable_resources"&&request.value("enabled",false))||action=="hide_resource"||action=="camera_color")resourceSession=true;
+    }
+    return result;
+}
+static void DesktopSessionDisconnected(State& s,bool& resourceSession) {
+    if(!resourceSession)return;
+    resourceSession=false;
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if(!s.stopped)QueueCommand(s,Command{Action::EnableResourceControls,{},0});
 }
 static std::filesystem::path ConfigRoot(State& s) {
     if(s.paths.getRoot&&s.paths.ensureRoot) {
@@ -153,7 +159,11 @@ static GakuStatus ActivateImpl(const GakuHostApi* host,void** output) {
     }
     Log(s,s.cameraCoreActivated?"Integrated camera core activated":"Integrated camera core unavailable; other resource controls remain available",s.cameraCoreActivated?GAKU_LOG_INFO:GAKU_LOG_WARNING);
 #endif
-    if(!s.desktopListener.Start([&s](const std::string& input){return DesktopMessage(s,input);}))Log(s,"独立窗口连接服务不可用",GAKU_LOG_WARNING);
+    // The listener is single-client. Record resource mutations on its thread;
+    // enqueue cleanup on disconnect so Unity and handoff calls stay on the game thread.
+    auto desktopResources=std::make_shared<bool>(false);
+    if(!s.desktopListener.Start([&s,desktopResources](const std::string& input){return DesktopSessionMessage(s,*desktopResources,input);},
+        [&s,desktopResources]{DesktopSessionDisconnected(s,*desktopResources);}))Log(s,"独立窗口连接服务不可用",GAKU_LOG_WARNING);
     *output=&s;Log(s,"独立人物插件已激活；不依赖 GakuMotion，不接管角色帧更新");return GAKU_OK;
 }
 static void RuntimeReadyImpl(void* context) {
@@ -339,6 +349,9 @@ static void TickImpl(void* context,float) {
                 ++next.preLiveCatalogRevision;
                 try {
                     if(!s.native.Ready())throw std::runtime_error("游戏运行时尚未就绪，请稍后手动更新");
+                    // Runtime metadata can be ready before the game's master database.
+                    // A desktop connection alone is not evidence that it is safe to read.
+                    if(!MayReadDesktopCatalog(next.admitted,next.preLiveDetected))throw std::runtime_error("等待进入拍摄、Live 或已确认的入场前页面；当前显示缓存目录");
                     if(s.native.Busy())throw std::runtime_error("游戏资源操作进行中，请稍后手动更新");
                     // Read Master data only. Optional descriptor factories and
                     // scene enumeration remain restricted to admitted scenes.
@@ -726,34 +739,13 @@ static void DesktopImpl(void* context) {
     {std::lock_guard<std::mutex> lock(s.mutex);snapshot=s.snapshot;legacyRevision=s.legacyThumbnailRevision;
         if(legacyRevision!=s.ui.ThumbnailRevision()){legacyId=s.legacyThumbnailId;legacyBody=s.legacyThumbnailData;legacyBodyStatus=s.legacyThumbnailStatus;legacyHead=s.legacyHeadData;legacyHeadStatus=s.legacyHeadStatus;}}
     if(legacyRevision!=s.ui.ThumbnailRevision())s.ui.SetThumbnail(legacyRevision,legacyId,legacyBody,legacyBodyStatus,legacyHead,legacyHeadStatus);
-    // Render embedded tools in the loader panel; the two native windows remain separate.
+    // Render the embedded tools in the loader panel.
     ImGui::TextUnformatted("GakuActors · 场景资源管理");
-    if(s.musicWindow&&WaitForSingleObject(s.musicWindow,0)!=WAIT_TIMEOUT){CloseHandle(s.musicWindow);s.musicWindow=nullptr;}
-    ImGui::BeginDisabled(s.musicWindow!=nullptr);
-    if(ImGui::Button("打开乐库")) {
-        const auto exe=DesktopExecutable();
-        if(exe.empty())s.musicWindowNotice="无法定位乐库程序";
-        else {
-            std::wstring cmd=L"\""+exe+L"\" --music-only";
-            STARTUPINFOW si{};si.cb=sizeof(si);PROCESS_INFORMATION pi{};
-            if(CreateProcessW(exe.c_str(),cmd.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&si,&pi)){
-                CloseHandle(pi.hThread);s.musicWindow=pi.hProcess;s.musicWindowNotice="乐库已打开";
-            } else s.musicWindowNotice="乐库启动失败，Windows 错误="+std::to_string(GetLastError());
-        }
-    }
-    ImGui::EndDisabled();
-    if(!s.musicWindowNotice.empty())ImGui::TextWrapped("%s",s.musicWindowNotice.c_str());
     ImGui::TextWrapped("%s",snapshot.admissionNotice.c_str());
-    if(ImGui::Button("打开独立资源窗口")) {
-        const auto path=DesktopExecutable();
-        if(path.empty())s.nativeWindowNotice="无法定位独立窗口程序";
-        else if(s.nativeWindow.Start(path,[&s](const std::string& request){return DesktopMessage(s,request);},s.nativeWindowNotice))s.nativeWindowNotice="独立窗口已启动";
-    }
-    ImGui::SameLine();if(ImGui::Button(s.dialogOpen?"收起模型界面":"模型界面")){s.dialogOpen=!s.dialogOpen;s.preLiveDialogOpen=false;}
+    if(ImGui::Button(s.dialogOpen?"收起模型界面":"模型界面")){s.dialogOpen=!s.dialogOpen;s.preLiveDialogOpen=false;}
     ImGui::SameLine();ImGui::BeginDisabled(!snapshot.runtime);
     if(ImGui::Button(s.preLiveDialogOpen?"收起 Live 入场前换装":"Live 入场前换装")){s.preLiveDialogOpen=!s.preLiveDialogOpen;s.dialogOpen=false;}
     ImGui::EndDisabled();
-    if(!s.nativeWindowNotice.empty())ImGui::TextWrapped("%s",s.nativeWindowNotice.c_str());
     ImGui::TextWrapped("人物目录与头身预设；独立加载默认关闭，可显式启用实验。");
     if(s.dialogOpen) {
         ImGui::Separator();
@@ -780,8 +772,7 @@ static void ShutdownImpl(void* context) {
     auto& s=*static_cast<State*>(context);s.stopped=true;
     s.freeCamera.Disable();
     if(s.cameraHandoffRequested&&s.cameraHandoff.request)s.cameraHandoff.request(0);
-    s.nativeWindow.Stop();s.desktopListener.Stop();
-    if(s.musicWindow){CloseHandle(s.musicWindow);s.musicWindow=nullptr;}
+    s.desktopListener.Stop();
     s.stageHook.Shutdown();
     s.preLiveHook.Shutdown();
     if(s.hotkeys.unregisterHotkey)s.hotkeys.unregisterHotkey(s.hotkeys.context,"show-actors");

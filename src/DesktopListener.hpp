@@ -22,11 +22,11 @@ class DesktopListener {
     }
 public:
     ~DesktopListener(){Stop();}
-    bool Start(std::function<std::string(const std::string&)> handler) {
+    bool Start(std::function<std::string(const std::string&)> handler,std::function<void()> disconnected={}) {
         if(worker_.joinable())return true;
         auto descriptor=UserDescriptor();if(!descriptor)return false;
         stopping_=false;
-        try {worker_=std::thread([this,handler=std::move(handler),descriptor]{
+        try {worker_=std::thread([this,handler=std::move(handler),disconnected=std::move(disconnected),descriptor]{
             const std::wstring name=L"\\\\.\\pipe\\GakuActors-v1-"+std::to_wstring(GetCurrentProcessId());
             SECURITY_ATTRIBUTES sa{sizeof(sa),descriptor,FALSE};
             while(!stopping_) {
@@ -40,6 +40,7 @@ public:
                     if(out.empty()||out.size()>16*1024*1024)break;
                     n=static_cast<uint32_t>(out.size());if(!WriteExact(pipe,&n,4)||!WriteExact(pipe,out.data(),n))break;
                 }
+                if(connected&&disconnected)try{disconnected();}catch(...){}
                 DisconnectNamedPipe(pipe);CloseHandle(pipe);
             }LocalFree(descriptor);
         });}catch(...){LocalFree(descriptor);return false;}return true;
