@@ -14,6 +14,9 @@ $binary=Join-Path $repo 'desktop-rust/target/release/gakuactors-desktop.exe'
 New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
 Copy-Item -LiteralPath $binary -Destination (Join-Path $OutputRoot 'GakuActors.Desktop.exe') -Force
 Copy-Item -LiteralPath (Join-Path $repo 'desktop-rust/Cargo.lock') -Destination $OutputRoot -Force
+Copy-Item -LiteralPath (Join-Path $repo 'Open-ResourceLibrary.ps1') -Destination $OutputRoot -Force
+Copy-Item -LiteralPath (Join-Path $repo 'Update-ResourceCatalog.py') -Destination $OutputRoot -Force
+Copy-Item -LiteralPath (Join-Path $repo 'RESOURCE-LIBRARY.md') -Destination $OutputRoot -Force
 Copy-Item -LiteralPath (Join-Path $repo 'camera-core/LICENSE') -Destination (Join-Path $OutputRoot 'GakuActors.Desktop-GPL-3.0.txt') -Force
 Copy-Item -LiteralPath (Join-Path $repo 'LICENSE') -Destination (Join-Path $OutputRoot 'GakuActors-source-MIT.txt') -Force
 Copy-Item -LiteralPath (Join-Path $repo 'THIRD_PARTY_NOTICES.md') -Destination $OutputRoot -Force

@@ -26,6 +26,16 @@ struct PreLiveLoadHookTestAccess {
 int main() {
     using namespace GakuActors;
     PreLiveLoadHookTestAccess::Forwarding();
+    {
+        State session;bool used=false;
+        DesktopSessionMessage(session,used,R"({"version":1,"action":"snapshot"})");
+        DesktopSessionDisconnected(session,used);assert(session.commands.empty());
+        auto accepted=Json::parse(DesktopSessionMessage(session,used,R"({"version":1,"action":"enable_resources","enabled":true})"));
+        assert(accepted["accepted"]==true&&used&&session.commands.size()==1);
+        DesktopSessionDisconnected(session,used);
+        assert(!used&&session.commands.size()==2&&session.commands[0].instance==1&&session.commands[1].action==Action::EnableResourceControls&&session.commands[1].instance==0);
+        DesktopSessionDisconnected(session,used);assert(session.commands.size()==2);
+    }
     State s;s.ready=true;
     assert(!s.dialogOpen&&!s.catalogRequested&&!s.sceneRequested);
     for(int i=0;i<120;++i)TickImpl(&s,1.0f/60.0f);

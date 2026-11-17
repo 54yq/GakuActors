@@ -7,6 +7,7 @@ mod color_dialog;
 mod scene_tree;
 mod people_catalog;
 mod music_window;
+mod resource_library;
 use slint_ui::*;
 use slint::{ComponentHandle,ModelRc,VecModel,SharedString,Image,SharedPixelBuffer,Rgba8Pixel};
 use serde_json::{json,Value};
@@ -17,6 +18,13 @@ const CACHE:usize=128;
 fn s<'a>(v:&'a Value,k:&str)->&'a str {v[k].as_str().unwrap_or("")}
 fn rows(v:&Value,k:&str)->Vec<Value>{v[k].as_array().cloned().unwrap_or_default()}
 fn flag(v:&Value,k:&str)->bool{v[k].as_bool().unwrap_or(false)}
+// Canonical display is [-180, 180); the plugin accepts equivalent 0–360°.
+fn signed_yaw(value:f64)->f64 {(value+180.0).rem_euclid(360.0)-180.0}
+#[cfg(test)] mod yaw_tests {
+    #[test] fn signed_yaw_wraps_and_preserves_equivalent_rotations(){
+        for (input,expected) in [(0.0,0.0),(90.0,90.0),(270.0,-90.0),(180.0,-180.0),(-181.0,179.0),(360.0,0.0),(540.0,-180.0)] {assert!((super::signed_yaw(input)-expected).abs()<1e-9);}
+    }
+}
 fn catalog_notice(value:&str)->String{if value.contains("not found master db file"){"游戏已连接，但人物数据库尚未就绪。请等待游戏完成加载后点击“重试目录”。".into()}else{value.to_owned()}}
 fn model<T:Clone+'static>(xs:Vec<T>)->ModelRc<T>{Rc::new(VecModel::from(xs)).into()}
 fn strings(xs:Vec<String>)->ModelRc<SharedString>{model(xs.into_iter().map(Into::into).collect())}
@@ -87,14 +95,14 @@ fn worker(mut client:Option<legacy::pipe::Client>,rx:mpsc::Receiver<Work>,tx:mps
     let (index_tx,index_rx)=mpsc::channel();if let Some(game)=game.clone(){let missing=catalog.is_null();if missing || offline_catalog::needs_prefetch(&game){std::thread::spawn(move||{if missing{let _=legacy::icons::build_index(&game);let _=index_tx.send(());}let _=legacy::icons::background_prefetch(&game);let _=index_tx.send(());});}}
     loop {
         if client.is_none()&&Instant::now()>=retry_at {
-            let result=game.as_deref().ok_or_else(||std::io::Error::new(std::io::ErrorKind::NotFound,"未找到游戏目录，请从游戏插件目录启动窗口")).and_then(legacy::pipe::Client::connect_game);
+            let result=game.as_deref().ok_or_else(||std::io::Error::new(std::io::ErrorKind::NotFound,"未配置游戏目录；资源库与导出仍可使用")).and_then(legacy::pipe::Client::connect_game);
             retry_at=Instant::now()+Duration::from_secs(2);
             match result {Ok(value)=>{client=Some(value);attempted=false;manual_retry=false;probe_notice.clear();previous=Value::Null;let _=tx.send(Event::Connected);},
                 Err(error)=>{let notice=error.to_string();if notice!=probe_notice&&tx.try_send(Event::Probe(notice.clone())).is_ok(){probe_notice=notice.clone();}if manual_retry{manual_retry=false;let _=tx.send(Event::RetryFailed(notice));}}
             }
         }
         if index_rx.try_recv().is_ok(){if let Some(game)=game.as_deref(){catalog=offline_catalog::load(game);saved_revision=0;let _=tx.send(Event::IconsUpdated);}}
-        let first=if commands.len()>16 {Err(mpsc::RecvTimeoutError::Timeout)}else{rx.recv_timeout(if pending.is_some(){Duration::from_millis(80)}else if !commands.is_empty()||!pictures.is_empty(){Duration::from_millis(5)}else{Duration::from_millis(700)})};
+        let first=if commands.len()>16 {Err(mpsc::RecvTimeoutError::Timeout)}else{rx.recv_timeout(if pending.is_some(){Duration::from_millis(80)}else if !commands.is_empty()||!pictures.is_empty(){Duration::from_millis(5)}else{Duration::from_millis(50)})};
         let mut incoming=Vec::new();match first {Ok(w)=>incoming.push(w),Err(mpsc::RecvTimeoutError::Disconnected)=>break,Err(_)=>{}}
         if commands.len()<=16 {incoming.extend(rx.try_iter().take(64));}
         for w in incoming {match w {
@@ -136,6 +144,21 @@ fn worker(mut client:Option<legacy::pipe::Client>,rx:mpsc::Receiver<Work>,tx:mps
     }
 }
 
+// The checkbox expresses the requested state directly, independent of any
+// older snapshot still in flight. Locked resources never produce a command.
+fn visibility_request(r:&Value,hidden:bool)->Option<Value>{
+    if flag(r,"locked"){return None;}
+    Some(json!({"action":"hide_resource","scene":r["scene"],"instance":r["instance"],"kind":r["kind"],"generation":r["generation"],"hidden":hidden}))
+}
+#[cfg(test)] mod visibility_tests {
+    use super::*;
+    #[test] fn checkbox_state_is_sent_explicitly_and_locked_nodes_are_rejected(){
+        let mut r=json!({"scene":4,"instance":5,"kind":1,"generation":7,"hidden":false,"locked":false});
+        assert_eq!(visibility_request(&r,true).unwrap(),json!({"action":"hide_resource","scene":4,"instance":5,"kind":1,"generation":7,"hidden":true}));
+        assert_eq!(visibility_request(&r,false).unwrap()["hidden"],false);
+        r["locked"]=true.into();assert!(visibility_request(&r,true).is_none());assert!(visibility_request(&r,false).is_none());
+    }
+}
 struct State {
     snapshot:Value,tx:Option<mpsc::SyncSender<Work>>,connected:bool,connection_detail:String,character:String,preset:String,actor:String,resource:String,
     body:String,head:String,edit_id:String,raw:[Vec<String>;3],cache:HashMap<String,Pictures>,lru:VecDeque<String>,requested:HashSet<String>,
@@ -158,7 +181,7 @@ impl State {
     fn part_rows(&self,ui:&Manager,kind:&str)->Vec<Value>{rows(&self.snapshot,kind).into_iter().filter(|v|ui.get_cross()||s(v,"character")==self.character).collect()}
     fn actor_value(&self)->Option<Value>{rows(&self.snapshot,"actors").into_iter().find(|v|key(v)==self.actor)}
     fn resource_value(&self)->Option<Value>{rows(&self.snapshot,"scene_resources").into_iter().find(|v|key(v)==self.resource)}
-    fn position(&self,ui:&Manager,a:&Value){let p=&a["position"];let x=p[0].as_f64().unwrap_or(0.0);let y=p[1].as_f64().unwrap_or(0.0);let z=p[2].as_f64().unwrap_or(0.0);ui.set_x_value(format!("{x:.2}").into());ui.set_y_value(format!("{y:.2}").into());ui.set_z_value(format!("{z:.2}").into());ui.set_x_pos(x.clamp(-256.0,256.0) as f32);ui.set_y_pos(y.clamp(-256.0,256.0) as f32);ui.set_z_pos(z.clamp(-256.0,256.0) as f32);}
+    fn position(&self,ui:&Manager,a:&Value){let p=&a["position"];let x=p[0].as_f64().unwrap_or(0.0);let y=p[1].as_f64().unwrap_or(0.0);let z=p[2].as_f64().unwrap_or(0.0);ui.set_x_value(format!("{x:.2}").into());ui.set_y_value(format!("{y:.2}").into());ui.set_z_value(format!("{z:.2}").into());ui.set_x_pos(x as f32);ui.set_y_pos(y as f32);ui.set_z_pos(z as f32);}
     fn render(&mut self,ui:&Manager){
         let admitted=flag(&self.snapshot,"admitted");let ready=admitted&&!flag(&self.snapshot,"busy")&&!flag(&self.snapshot,"playing")&&!flag(&self.snapshot,"faulted");
         ui.set_live_pause_available(flag(&self.snapshot,"live_pause_available"));ui.set_live_paused(flag(&self.snapshot,"live_paused"));ui.set_live_pause_owned(flag(&self.snapshot,"live_pause_owned"));ui.set_in_live(flag(&self.snapshot,"in_live"));ui.set_live_pause_status(s(&self.snapshot,"live_pause_status").into());
@@ -206,11 +229,11 @@ impl State {
             ui.set_actors(model(actors.iter().filter(|v|s(v,"name").to_lowercase().contains(&query)).map(|v|Entry{key:key(v).into(),label:s(v,"name").into(),detail:if flag(v,"owned"){"本插件新增".into()}else{"场景原有人物".into()},selected:key(v)==self.actor,..Default::default()}).collect()));
             let resources=rows(&self.snapshot,"scene_resources");
             if page!=1 {self.tree_rows=scene_tree::build(&resources,s(&self.snapshot,"active_scene_name"),page==3,&self.collapsed,&query,&self.notes);
-                ui.set_resources(model(self.tree_rows.iter().map(|r|Entry{key:r.key.clone().into(),label:format!("{}{}",if flag(&r.value,"hidden"){"[已隐藏] "}else{""},s(&r.value,"name")).into(),detail:[if flag(&r.value,"locked"){"受保护".to_owned()}else{"可控制".to_owned()},r.guess.map(|x|format!("推测：{x}")).unwrap_or_default(),if r.note.is_empty(){String::new()}else{format!("备注：{}",r.note)}].into_iter().filter(|v|!v.is_empty()).collect::<Vec<_>>().join(" · ").into(),selected:r.key==self.resource,depth:r.depth.min(8) as i32,expandable:r.has_children,expanded:r.expanded,..Default::default()}).collect()));
+                ui.set_resources(model(self.tree_rows.iter().map(|r|Entry{key:r.key.clone().into(),label:s(&r.value,"name").into(),detail:[if flag(&r.value,"locked"){"受保护".to_owned()}else{"可控制".to_owned()},r.guess.map(|x|format!("推测：{x}")).unwrap_or_default(),if r.note.is_empty(){String::new()}else{format!("备注：{}",r.note)}].into_iter().filter(|v|!v.is_empty()).collect::<Vec<_>>().join(" · ").into(),selected:r.key==self.resource,depth:r.depth.min(8) as i32,expandable:r.has_children,expanded:r.expanded,hidden:flag(&r.value,"hidden"),locked:flag(&r.value,"locked"),..Default::default()}).collect()));
                 ui.set_note_writable(!self.notes_error&&self.notes_path.is_some()&&self.tree_rows.iter().any(|r|r.key==self.resource&&r.note_key.is_some()));
             }
-            if page==1 {if let Some(a)=self.actor_value(){ui.set_selection(s(&a,"name").into());ui.set_actor_owned(flag(&a,"owned"));ui.set_pose_supported(flag(&a,"pose_supported"));ui.set_detail(format!("身体：{}\n脸部：{}\n头发：{}",s(&a,"bodyAsset"),s(&a,"faceAsset"),s(&a,"hairAsset")).into());ui.set_can_hide(ready&&flag(&self.snapshot,"resource_enabled")&&resources.iter().any(|r|r["kind"]==0&&r["owner"]==a["instance"]&&!flag(r,"locked")));if self.pose_dirty {let p=&a["position"];let target=[ui.get_x_value().parse::<f32>().unwrap_or(0.0),ui.get_y_value().parse::<f32>().unwrap_or(0.0),ui.get_z_value().parse::<f32>().unwrap_or(0.0)];if (0..3).all(|i|p[i].as_f64().is_some_and(|v|(v-target[i] as f64).abs()<0.02)){self.pose_dirty=false;}}if !self.pose_dirty{self.position(ui,&a);}if let Some((id,rev))=self.reset_yaw {if self.snapshot["pose_reset_yaw_actor"].as_i64()==Some(id)&&self.snapshot["pose_reset_yaw_revision"].as_u64().unwrap_or(0)>rev {if let Some(y)=self.snapshot["pose_reset_yaw"].as_f64(){ui.set_yaw_pos(y.clamp(0.0,360.0) as f32);ui.set_yaw_value(format!("{y:.1}").into());self.yaw_dirty=true;}self.reset_yaw=None;}}if let Some(y)=a["yaw"].as_f64(){if self.yaw_dirty&&((y-ui.get_yaw_pos() as f64+540.0)%360.0-180.0).abs()<0.25{self.yaw_dirty=false;}if !self.yaw_dirty{ui.set_yaw_pos(y.clamp(0.0,360.0) as f32);ui.set_yaw_value(format!("{y:.1}").into());}}if let Some((id,rev))=self.reset{if self.snapshot["pose_reset_actor"].as_i64()==Some(id)&&self.snapshot["pose_reset_revision"].as_u64().unwrap_or(0)>rev {self.position(ui,&a);self.pose_dirty=false;self.reset=None;}}}}
-            else if let Some(r)=self.resource_value(){ui.set_selection(s(&r,"name").into());ui.set_detail(format!("当前：{}\n父节点：{}\n层级：{}\n{}",if flag(&r,"hidden"){"隐藏"}else{"显示"},r["parent"],r["depth"],if flag(&r,"locked"){"受保护节点，不能修改"}else{"启用资源控制后可切换显隐"}).into());ui.set_can_hide(ready&&flag(&self.snapshot,"resource_enabled")&&!flag(&r,"locked"));}
+            if page==1 {if let Some(a)=self.actor_value(){ui.set_selection(s(&a,"name").into());ui.set_actor_owned(flag(&a,"owned"));ui.set_pose_supported(flag(&a,"pose_supported"));ui.set_detail(format!("身体：{}\n脸部：{}\n头发：{}",s(&a,"bodyAsset"),s(&a,"faceAsset"),s(&a,"hairAsset")).into());ui.set_can_hide(ready&&flag(&self.snapshot,"resource_enabled")&&resources.iter().any(|r|r["kind"]==0&&r["owner"]==a["instance"]&&!flag(r,"locked")));if self.pose_dirty {let p=&a["position"];let target=[ui.get_x_value().parse::<f32>().unwrap_or(0.0),ui.get_y_value().parse::<f32>().unwrap_or(0.0),ui.get_z_value().parse::<f32>().unwrap_or(0.0)];if (0..3).all(|i|p[i].as_f64().is_some_and(|v|(v-target[i] as f64).abs()<0.02)){self.pose_dirty=false;}}if !self.pose_dirty{self.position(ui,&a);}if let Some((id,rev))=self.reset_yaw {if self.snapshot["pose_reset_yaw_actor"].as_i64()==Some(id)&&self.snapshot["pose_reset_yaw_revision"].as_u64().unwrap_or(0)>rev {if let Some(y)=self.snapshot["pose_reset_yaw"].as_f64(){let y=signed_yaw(y);ui.set_yaw_pos(y as f32);ui.set_yaw_value(format!("{y:.1}").into());self.yaw_dirty=true;}self.reset_yaw=None;}}if let Some(y)=a["yaw"].as_f64(){if self.yaw_dirty&&signed_yaw(y-ui.get_yaw_pos() as f64).abs()<0.25{self.yaw_dirty=false;}if !self.yaw_dirty{let y=signed_yaw(y);ui.set_yaw_pos(y as f32);ui.set_yaw_value(format!("{y:.1}").into());}}if let Some((id,rev))=self.reset{if self.snapshot["pose_reset_actor"].as_i64()==Some(id)&&self.snapshot["pose_reset_revision"].as_u64().unwrap_or(0)>rev {self.position(ui,&a);self.pose_dirty=false;self.reset=None;}}}}
+            else if let Some(r)=self.resource_value(){ui.set_selection(s(&r,"name").into());let actual=if r["kind"]==1{format!("\n扫描时对象：{}",if flag(&r,"active"){"启用"}else{"停用"})}else{String::new()};ui.set_detail(format!("控制状态：{}{}\n父节点：{}\n层级：{}\n{}",if flag(&r,"hidden"){"已请求隐藏"}else{"未请求隐藏"},actual,r["parent"],r["depth"],if flag(&r,"locked"){"受保护节点，不能修改"}else{"启用资源控制后可切换显隐；重新扫描可更新对象状态"}).into());ui.set_can_hide(ready&&flag(&self.snapshot,"resource_enabled")&&!flag(&r,"locked"));}
         }
         ui.set_selected_body_ready(pictures.body.size().width>0);ui.set_selected_head_ready(pictures.head.size().width>0);ui.set_selected_body(pictures.body);ui.set_selected_head(pictures.head);
     }
@@ -262,6 +285,7 @@ impl State {
             "move"=>{self.pose_dirty=true;if let Some(a)=self.actor_value(){let values=[ui.get_x_value(),ui.get_y_value(),ui.get_z_value()];let p:Option<Vec<f64>>=values.iter().map(|x|x.parse::<f64>().ok().filter(|n|n.is_finite()&&n.abs()<=10000.0)).collect();if let Some(p)=p{self.send(json!({"action":"move","instance":a["instance"],"position":p}));}}},
             "reset"=>{if let Some(a)=self.actor_value(){self.reset=Some((a["instance"].as_i64().unwrap_or(0),self.snapshot["pose_reset_revision"].as_u64().unwrap_or(0)));self.send(json!({"action":"reset_position","instance":a["instance"]}));}},
             "turn"|"yaw"=>{if let Some(a)=self.actor_value(){let value=if action=="yaw"{ui.get_yaw_value().to_string()}else{arg.into()};if let Ok(n)=value.parse::<f64>() {if n.is_finite()&&n.abs()<=360.0 {self.send(json!({"action":if action=="yaw"{"set_yaw"}else{"turn"},"instance":a["instance"],"degrees":n}));}else{self.message="请输入有效角度（0–360）。".into();}}}},
+            "hide-row-on"|"hide-row-off"=>{if let Some(r)=rows(&self.snapshot,"scene_resources").into_iter().find(|r|key(r)==arg){self.set_hidden(r,action=="hide-row-on");}return;},
             "hide"=>{if let Some(r)=self.resource_value(){self.hide(r);}},
             "hide-actor"=>{if let Some(a)=self.actor_value(){if let Some(r)=rows(&self.snapshot,"scene_resources").into_iter().find(|r|r["kind"]==0&&r["owner"]==a["instance"]&&!flag(r,"locked")){self.hide(r);}}},
             "stage"=>self.send(json!({"action":"select_stage","choice":ui.get_stage_index()})),
@@ -277,7 +301,8 @@ impl State {
             "music"=>{if let Ok(exe)=std::env::current_exe(){use std::os::windows::process::CommandExt;if std::process::Command::new(exe).arg("--music-only").creation_flags(0x08000000).spawn().is_err(){self.message="乐库窗口无法启动。".into();}}},_=>{}
         }self.render(ui);
     }
-    fn hide(&mut self,r:Value){if !flag(&r,"locked"){self.send(json!({"action":"hide_resource","scene":r["scene"],"instance":r["instance"],"kind":r["kind"],"generation":r["generation"],"hidden":!flag(&r,"hidden")}));}}
+    fn hide(&mut self,r:Value){let hidden=!flag(&r,"hidden");self.set_hidden(r,hidden);}
+    fn set_hidden(&mut self,r:Value,hidden:bool){if let Some(request)=visibility_request(&r,hidden){self.send(request);}}
     fn save_preset(&mut self,ui:&Manager){if self.save.is_some()||!ui.get_save_ready(){return;}let id=if self.edit_id.is_empty(){format!("user-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos())}else{self.edit_id.clone()};let mut name=ui.get_preset_name().trim().to_owned();if name.is_empty(){let label=rows(&self.snapshot,"characters").into_iter().find(|v|s(v,"id")==self.character).map(|v|s(&v,"name").to_owned()).unwrap_or_else(||self.character.clone());name=format!("{} · 自定义组合",label);}if name.chars().any(char::is_control)||name.len()>160{self.message="预设名称过长或含控制字符。".into();return;}
         let mut p=json!({"id":id,"name":name,"character":self.character,"body":"","head":"","factory":"","bodyAsset":"","faceAsset":"","hairAsset":""});
         if ui.get_raw_mode(){for (i,k) in ["bodyAsset","faceAsset","hairAsset"].iter().enumerate(){let index=[ui.get_body_index(),ui.get_face_index(),ui.get_hair_index()][i];let Some(value)=usize::try_from(index).ok().and_then(|x|self.raw[i].get(x))else{return;};p[*k]=value.clone().into();}}
@@ -292,17 +317,28 @@ fn run()->Result<(),Box<dyn std::error::Error>>{
     slint::BackendSelector::new().backend_name("winit".into()).renderer_name("software".into()).select()?;
     music_window::platform::configure_font_fallback();
     let ui=Manager::new()?;
+    // Check the offline resource library in a separate process; network failure
+    // and exporter work must never block the desktop or the game pipe.
+    std::thread::spawn(|| {
+        use std::os::windows::process::CommandExt;
+        if let Some(script)=std::env::current_exe().ok().and_then(|p|p.parent().map(|p|p.join("Open-ResourceLibrary.ps1"))).filter(|p|p.is_file()) {
+            let _=std::process::Command::new("powershell.exe").args(["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File"]).arg(script).arg("-NoBrowser").creation_flags(0x08000000).output();
+        }
+    });
     let (tx,rx)=mpsc::sync_channel(64);let (events_tx,events_rx)=mpsc::sync_channel(8);
     let client=legacy::pipe::Client::from_args().ok();std::thread::spawn(move||worker(client,rx,events_tx));
     let notes_path=legacy::music::game_root().ok().map(|p|p.join("GakuLoader/Configs/gakuactors/scene-notes.json"));
     let (notes,notes_error)=match notes_path.as_ref().map(|p|scene_tree::load_notes(p)){Some(Ok(v))=>(v,false),Some(Err(_))=>(BTreeMap::new(),true),None=>(BTreeMap::new(),true)};
     let state=Rc::new(RefCell::new(State{snapshot:json!({"status":"等待游戏和 GakuActors 插件"}),tx:Some(tx),connected:false,connection_detail:"正在检测游戏".into(),character:String::new(),preset:String::new(),actor:String::new(),resource:String::new(),body:String::new(),head:String::new(),edit_id:String::new(),raw:Default::default(),cache:HashMap::new(),lru:VecDeque::new(),requested:HashSet::new(),tree_rows:Vec::new(),collapsed:HashSet::new(),notes,notes_path,notes_error,yaw_dirty:false,pages:[0;3],catalog_scan:None,reference:0,stage_initialized:false,confirm:None,undo:None,save:None,message:String::new(),pose_dirty:false,reset:None,reset_yaw:None}));
+    let library=Rc::new(RefCell::new(resource_library::Library::new()));
+    let weak=ui.as_weak();let lib=library.clone();ui.on_library_action(move|action,arg|{if let Some(ui)=weak.upgrade(){lib.borrow_mut().action(&ui,&action,&arg);}});
     let weak=ui.as_weak();let st=state.clone();ui.on_action(move|a,b|{if let Some(ui)=weak.upgrade(){st.borrow_mut().act(&ui,&a,&b);}});
     let weak=ui.as_weak();let st=state.clone();ui.on_changed(move|kind|{if let Some(ui)=weak.upgrade(){let mut st=st.borrow_mut();if kind=="cross"{st.body.clear();st.head.clear();st.pages=[0;3];st.raw_choices(&ui);}st.render(&ui);}});
     state.borrow_mut().render(&ui);
     ui.show()?;
     let mut startup_size_ready=apply_initial_window_size(ui.window());
-    let timer=slint::Timer::default();let weak=ui.as_weak();let mut title_bar_ready=false;timer.start(slint::TimerMode::Repeated,Duration::from_millis(160),move||{let Some(ui)=weak.upgrade()else{return;};if !startup_size_ready{startup_size_ready=apply_initial_window_size(ui.window());}if !title_bar_ready{title_bar_ready=music_window::platform::sync_title_bar(ui.window(),0);}let mut st=state.borrow_mut();let mut dirty=false;for e in events_rx.try_iter().take(16){dirty=true;match e {Event::IconsUpdated=>{let empty:Vec<_>=st.cache.iter().filter(|(k,p)|if k.starts_with("part:body:"){p.body.size().width==0}else if k.starts_with("part:head:"){p.head.size().width==0}else{p.body.size().width==0||p.head.size().width==0}).map(|(k,_)|k.clone()).collect();for k in empty{st.cache.remove(&k);st.lru.retain(|x|x!=&k);}},Event::Snapshot(v)=>{if flag(&v,"runtime")&&st.message=="游戏连接已断开，正在等待重新连接。"{st.message.clear();}st.snapshot=v;},Event::Picture(k,a,b)=>st.picture(k,a,b),Event::NotesSaved(result)=>{st.message=match result{Ok(())=>"备注已保存。".into(),Err(e)=>format!("备注保存失败：{e}")};},Event::ScanRejected=>{st.catalog_scan=None;st.message="读取目录请求未被接受，请稍后重试。".into();},Event::Probe(notice)=>{if st.message=="游戏连接已断开，正在等待重新连接。"||st.message.ends_with("；窗口会继续自动检测。") {st.message=format!("{notice}；窗口会继续自动检测。");}st.connection_detail=notice;},Event::RetryFailed(notice)=>{st.connection_detail=notice.clone();st.message=format!("{notice}；窗口会继续自动检测。");},Event::Connected=>{st.connected=true;st.connection_detail.clear();st.message.clear();},Event::Disconnected=>{st.connected=false;st.connection_detail="正在检测游戏".into();st.catalog_scan=None;st.requested.clear();st.snapshot=json!({"status":"游戏连接已断开，等待重新连接","runtime":false});st.message="游戏连接已断开，正在等待重新连接。".into();}}}if dirty||st.save.is_some()||st.catalog_scan.is_some(){st.render(&ui);}});
+    {let weak=ui.as_weak();let state=state.clone();ui.on_drag_position(move |axis,delta|{let Some(ui)=weak.upgrade()else{return;};if !delta.is_finite()||delta==0.0{return;}let mut st=state.borrow_mut();if axis.as_str()=="朝向" {let value=signed_yaw(ui.get_yaw_pos() as f64+delta as f64*0.1);ui.set_yaw_pos(value as f32);ui.set_yaw_value(format!("{value:.1}").into());st.yaw_dirty=true;if let Some(a)=st.actor_value(){st.send(json!({"action":"set_yaw","instance":a["instance"],"degrees":value.rem_euclid(360.0)}));}return;}let mut values=[ui.get_x_value().parse::<f64>().unwrap_or(0.0),ui.get_y_value().parse::<f64>().unwrap_or(0.0),ui.get_z_value().parse::<f64>().unwrap_or(0.0)];let i=match axis.as_str(){"X"=>0,"Y"=>1,"Z"=>2,_=>return};let current=match i{0=>ui.get_x_pos(),1=>ui.get_y_pos(),_=>ui.get_z_pos()};values[i]=(current as f64+delta as f64*0.01).clamp(-10000.0,10000.0);match i{0=>{ui.set_x_pos(values[i] as f32);ui.set_x_value(format!("{:.2}",values[i]).into());},1=>{ui.set_y_pos(values[i] as f32);ui.set_y_value(format!("{:.2}",values[i]).into());},_=>{ui.set_z_pos(values[i] as f32);ui.set_z_value(format!("{:.2}",values[i]).into());}};st.pose_dirty=true;if let Some(a)=st.actor_value(){st.send(json!({"action":"move","instance":a["instance"],"position":values}));}});}
+    let timer=slint::Timer::default();let weak=ui.as_weak();let lib=library.clone();let mut title_bar_ready=false;timer.start(slint::TimerMode::Repeated,Duration::from_millis(160),move||{let Some(ui)=weak.upgrade()else{return;};lib.borrow_mut().poll(&ui);if !startup_size_ready{startup_size_ready=apply_initial_window_size(ui.window());}if !title_bar_ready{title_bar_ready=music_window::platform::sync_title_bar(ui.window(),0);}let mut st=state.borrow_mut();let mut dirty=false;for e in events_rx.try_iter().take(16){dirty=true;match e {Event::IconsUpdated=>{let empty:Vec<_>=st.cache.iter().filter(|(k,p)|if k.starts_with("part:body:"){p.body.size().width==0}else if k.starts_with("part:head:"){p.head.size().width==0}else{p.body.size().width==0||p.head.size().width==0}).map(|(k,_)|k.clone()).collect();for k in empty{st.cache.remove(&k);st.lru.retain(|x|x!=&k);}},Event::Snapshot(v)=>{if flag(&v,"runtime")&&st.message=="游戏连接已断开，正在等待重新连接。"{st.message.clear();}st.snapshot=v;},Event::Picture(k,a,b)=>st.picture(k,a,b),Event::NotesSaved(result)=>{st.message=match result{Ok(())=>"备注已保存。".into(),Err(e)=>format!("备注保存失败：{e}")};},Event::ScanRejected=>{st.catalog_scan=None;st.message="读取目录请求未被接受，请稍后重试。".into();},Event::Probe(notice)=>{if st.message=="游戏连接已断开，正在等待重新连接。"||st.message.ends_with("；窗口会继续自动检测。") {st.message=format!("{notice}；窗口会继续自动检测。");}st.connection_detail=notice;},Event::RetryFailed(notice)=>{st.connection_detail=notice.clone();st.message=format!("{notice}；窗口会继续自动检测。");},Event::Connected=>{st.connected=true;st.connection_detail.clear();st.message.clear();},Event::Disconnected=>{st.connected=false;st.connection_detail="正在检测游戏".into();st.catalog_scan=None;st.requested.clear();st.snapshot=json!({"status":"游戏连接已断开，等待重新连接","runtime":false});st.message="游戏连接已断开，正在等待重新连接。".into();}}}if dirty||st.save.is_some()||st.catalog_scan.is_some(){st.render(&ui);}});
     music_window::platform::sync_title_bar(ui.window(),0);
     ui.run()?;Ok(())
 }

@@ -1,5 +1,8 @@
 // Included inside NativeApi. All methods are called from the Unity thread.
 // The scan is explicit and bounded. Resource handles are never sent to the UI.
+static bool SupportedPropGeometry(const std::string& root,const std::string& prop,const std::string& geometry) {
+    return root=="Root_Hknesuitcase"&&prop=="Prop_Hknesuitcase"&&geometry=="Geo_Hknesuitcase";
+}
 bool ResourceActive(const ResourceLease& lease) {
     void* object=lease.handle?handleTarget_(lease.handle):nullptr;
     void* owner=lease.ownerHandle?handleTarget_(lease.ownerHandle):nullptr;
@@ -15,7 +18,12 @@ bool ResourceActive(const ResourceLease& lease) {
         if(roots!=1)return false;
         void* found=nullptr;int matches=0;
         for(void* node:Children(root))if(Text(node,"get_name")==lease.prop){found=GameObject(node);++matches;}
-        if(matches!=1||found!=object)return false;
+        if(matches!=1||found!=owner)return false;
+        if(object!=owner) {
+            void* geometry=nullptr;int geometries=0;
+            for(void* node:Children(root))if(SupportedPropGeometry(lease.root,lease.prop,Text(node,"get_name"))){geometry=GameObject(node);++geometries;}
+            if(geometries!=1||geometry!=object)return false;
+        }
     }
     if(lease.property!="activeSelf") {
         void* ownerGo=GameObject(owner);if(!ownerGo||SceneOf(ownerGo)!=lease.scene)return false;
@@ -159,6 +167,30 @@ void RememberResource(std::vector<SceneResource>& items,SceneResource item,void*
     if(actor&&!actorHandle){freeHandle_(handle);throw std::runtime_error("无法保留道具所属人物");}
     resourceCandidates_.push_back({item,handle,actorHandle,root,prop});items.push_back(std::move(item));
 }
+// Opt-in diagnostics for identifying which actor renderers belong to a prop.
+// Only observations are logged; all targets remain owned by the game.
+void TraceSuitcaseRenderers(void* actor) {
+    if(!trace)return;
+    try {
+        void* renderer=Class("UnityEngine","Renderer");
+        auto method=Method(objectClass_(actor),"GetComponentsInChildren",2,false,{0x12,2});
+        if(!renderer||!method)return;
+        Pin type(*this,typeObject_(classType_(renderer)));bool includeInactive=true;void* args[]{type.Get(),&includeInactive};
+        Pin array(*this,Call(method,actor,args));if(!array.Get())return;
+        const auto count=arrayLength_(array.Get());if(count>512)return;
+        auto values=reinterpret_cast<void**>(static_cast<char*>(array.Get())+4*sizeof(void*));
+        for(uintptr_t i=0;i<count;++i) {
+            void* render=values[i];if(!render)continue;
+            void* t=Call(On(render,"get_transform"),render);std::string path;
+            for(int depth=0;t&&depth<64;++depth) {
+                path=Text(t,"get_name")+(path.empty()?"":"/"+path);
+                t=Call(On(t,"get_parent"),t);
+            }
+            void* go=GameObject(render);
+            Trace((std::string("Suitcase diagnostic renderer path=")+path+" active="+(go&&Bool(go,"get_activeInHierarchy")?"1":"0")+" enabled="+(Bool(render,"get_enabled")?"1":"0")).c_str());
+        }
+    }catch(const std::exception& e){Trace((std::string("Suitcase diagnostic unavailable: ")+e.what()).c_str());}
+}
 std::vector<SceneResource> ScanResources() {
     std::vector<SceneResource> items;if(!PerformanceScene())return items;
     ClearResourceCandidates();++resourceGeneration_;if(!resourceGeneration_)++resourceGeneration_;
@@ -179,7 +211,10 @@ std::vector<SceneResource> ScanResources() {
             if(matches!=1)continue;
             void* propGo=GameObject(found);if(!propGo||SceneOf(propGo)!=PerformanceScene())continue;
             const int propId=Int(propGo,"GetInstanceID");if(!propId)continue;
-            RememberResource(items,{SceneResourceKind::Prop,propId,propId,PerformanceScene(),resourceGeneration_,label+" / "+pn,ResourceHidden(propId,SceneResourceKind::Prop)},propGo,actor,rn,pn);
+            SceneResource item{SceneResourceKind::Prop,propId,propId,PerformanceScene(),resourceGeneration_,label+" / "+pn,ResourceHidden(propId,SceneResourceKind::Prop)};
+            item.active=Bool(propGo,"get_activeSelf");
+            RememberResource(items,std::move(item),propGo,actor,rn,pn);
+            if(pn=="Prop_Hknesuitcase")TraceSuitcaseRenderers(actor);
         }
     }
     for(void* camera:Objects(Class("UnityEngine","Camera"))) {
@@ -248,6 +283,7 @@ bool SetResourceHidden(const SceneResource& item,bool hidden) {
                 if(!left.Get()||!right.Get()||*static_cast<bool*>(unbox_(left.Get()))||*static_cast<bool*>(unbox_(right.Get())))return false;
             }
     }
+    void* propGeometry=nullptr;
     if(item.kind==SceneResourceKind::Prop) {
         void* actor=candidate->actorHandle?handleTarget_(candidate->actorHandle):nullptr;
         if(!actor||SceneOf(GameObject(actor))!=item.scene)return false;
@@ -257,6 +293,11 @@ bool SetResourceHidden(const SceneResource& item,bool hidden) {
         void* found=nullptr;int matches=0;
         for(void* node:Children(root))if(Text(node,"get_name")==candidate->prop){found=GameObject(node);++matches;}
         if(matches!=1||found!=object)return false;
+        if(candidate->root=="Root_Hknesuitcase"&&candidate->prop=="Prop_Hknesuitcase") {
+            int geometries=0;
+            for(void* node:Children(root))if(SupportedPropGeometry(candidate->root,candidate->prop,Text(node,"get_name"))){propGeometry=GameObject(node);++geometries;}
+            if(geometries!=1||!propGeometry||SceneOf(propGeometry)!=item.scene)return false;
+        }
     }
     if(!hidden)return RestoreResources(item.owner,item.kind,false);
     if(ResourceHidden(item.owner,item.kind))return true;
@@ -277,8 +318,16 @@ bool SetResourceHidden(const SceneResource& item,bool hidden) {
             return true;
         } catch(...) {RestoreResources(item.owner,item.kind,false);throw;}
     }
-    return SaveAndWriteResource(object,object,item.scene,item.kind,"activeSelf",false,
-        candidate->actorHandle?handleTarget_(candidate->actorHandle):nullptr,candidate->root,candidate->prop);
+    void* actor=candidate->actorHandle?handleTarget_(candidate->actorHandle):nullptr;
+    if(propGeometry) {
+        try {
+            if(!SaveAndWriteResource(object,object,item.scene,item.kind,"activeSelf",false,actor,candidate->root,candidate->prop)||
+               !SaveAndWriteResource(propGeometry,object,item.scene,item.kind,"activeSelf",false,actor,candidate->root,candidate->prop))
+                throw std::runtime_error("行李箱显隐保存失败");
+            return true;
+        } catch(...) {RestoreResources(item.owner,item.kind,false);throw;}
+    }
+    return SaveAndWriteResource(object,object,item.scene,item.kind,"activeSelf",false,actor,candidate->root,candidate->prop);
 }
 void EndResourceSession() {
     if(!RestoreCamera())Trace("Camera restore incomplete; retaining identity-checked record");
