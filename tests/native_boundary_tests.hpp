@@ -193,6 +193,38 @@ struct NativeApiTestAccess {
         check(!NativeApi::SupportedPropGeometry("Root_Microphone","Prop_Microphone","Geo_Hknesuitcase"));
         check(!NativeApi::SupportedPropGeometry("Root_Hknesuitcase","Prop_Hknesuitcase","Geo_Body"));
         check(NativeApi::SupportedProp("Root_Penlight","Prop_Penlight"));
+
+        {
+            struct Node { std::string name; std::vector<void*> children; };
+            Node microphone{"Prop_Microphone"};
+            Node suitcase{"Prop_Hknesuitcase"}, geometry{"Geo_Hknesuitcase"};
+            Node penlight{"Prop_Penlightklljduo"};
+            Node waterGun{"Prop_Water_Gun"}, candy{"Prop_CharacterCandy"}, pinwheel{"Prop_Pinwheel"};
+            Node body{"Prop_Body"}, duplicate{"Prop_Duplicate"}, duplicate2{"Prop_Duplicate"};
+            Node unrelated{"Prop_StageOnly"}, foreignProp{"Prop_Penlight"};
+            Node rootMic{"Root_Microphone", {&microphone}};
+            Node rootBag{"Root_Hknesuitcase", {&suitcase, &geometry}};
+            Node rootLight{"Root_Penlightklljduo", {&penlight}};
+            Node rootGun{"Root_Water_Gun", {&waterGun}}, rootCandy{"Root_CharacterCandy", {&candy}};
+            Node rootPinwheel{"Root_Pinwheel", {&pinwheel}};
+            Node rootBody{"Root_Body", {&body}}, rootDuplicate{"Root_Duplicate", {&duplicate, &duplicate2}};
+            Node rootForeign{"Root_Penlight", {&foreignProp}};
+            Node foreignActor{"Actor", {&rootForeign}}, wrapper{"Model", {&rootBag, &rootLight, &rootGun, &rootCandy, &rootPinwheel, &rootBody, &rootDuplicate}};
+            Node actor{"Actor", {&wrapper, &rootMic, &unrelated, &foreignActor}};
+            const auto props = scene_props::ScanActorProps(&actor,
+                [](void* node) { return static_cast<Node*>(node)->children; },
+                [](void* node) { return static_cast<Node*>(node)->name; },
+                [&](void* node) { return node == &foreignActor; });
+            const bool complete = props.size() == 6 && std::all_of(props.begin(), props.end(), [&](const auto& prop) {
+                return prop.object == &microphone || prop.object == &suitcase || prop.object == &penlight ||
+                    prop.object == &waterGun || prop.object == &candy || prop.object == &pinwheel;
+            });
+            check(complete && scene_props::DisplayName("Prop_Penlightklljduo") == "荧光棒（Penlightklljduo）");
+            check(scene_props::DisplayName("Prop_Water_Gun") == "水枪（Water_Gun）" &&
+                scene_props::DisplayName("Prop_CharacterCandy") == "糖果（CharacterCandy）" &&
+                scene_props::DisplayName("Prop_Pinwheel") == "Prop_Pinwheel");
+        }
+
         check(!NativeApi::SupportedProp("Root_Body","Prop_Body"));
         check(!NativeApi::SupportedProp("Root_Microphone","Prop_Body"));
         check(!NativeApi::SupportedProp("Root_","Prop_"));

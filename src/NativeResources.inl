@@ -13,17 +13,10 @@ bool ResourceActive(const ResourceLease& lease) {
     if(lease.kind==SceneResourceKind::Prop) {
         void* actor=lease.actorHandle?handleTarget_(lease.actorHandle):nullptr;
         if(!actor||SceneOf(GameObject(actor))!=lease.scene)return false;
-        void* transform=Call(On(actor,"get_transform"),actor);void* root=nullptr;int roots=0;
-        for(void* node:Children(transform))if(Text(node,"get_name")==lease.root){root=node;++roots;}
-        if(roots!=1)return false;
-        void* found=nullptr;int matches=0;
-        for(void* node:Children(root))if(Text(node,"get_name")==lease.prop){found=GameObject(node);++matches;}
-        if(matches!=1||found!=owner)return false;
-        if(object!=owner) {
-            void* geometry=nullptr;int geometries=0;
-            for(void* node:Children(root))if(SupportedPropGeometry(lease.root,lease.prop,Text(node,"get_name"))){geometry=GameObject(node);++geometries;}
-            if(geometries!=1||geometry!=object)return false;
-        }
+        void* root = ResolvePropRoot(actor, owner, lease.scene, lease.root, lease.prop);
+        if (!root) return false;
+        if (object != owner && PropGeometry(root, lease.scene, lease.root, lease.prop) != object)
+            return false;
     }
     if(lease.property!="activeSelf") {
         void* ownerGo=GameObject(owner);if(!ownerGo||SceneOf(ownerGo)!=lease.scene)return false;
@@ -93,13 +86,8 @@ static bool ProtectedSceneName(const std::string& lower) {
         if(lower.find(part)!=std::string::npos)return true;
     return lower.rfind("ui",0)==0||lower.rfind("api_",0)==0||lower=="api";
 }
-static bool SupportedProp(const std::string& root,const std::string& prop) {
-    if(root.size()<=5||root.size()>120||root.compare(0,5,"Root_")||prop!="Prop_"+root.substr(5))return false;
-    std::string lower=root.substr(5);
-    std::transform(lower.begin(),lower.end(),lower.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
-    for(const char* part:{"body","face","hair","head","bone","skeleton","hand","foot","costume"})
-        if(lower.find(part)!=std::string::npos)return false;
-    return true;
+static bool SupportedProp(const std::string& root, const std::string& prop) {
+    return scene_props::IsSupportedPair(root, prop);
 }
 std::vector<void*> Children(void* transform) {
     std::vector<void*> result;if(!transform)return result;
@@ -107,6 +95,38 @@ std::vector<void*> Children(void* transform) {
     const auto get=Method(objectClass_(transform),"GetChild",1,false,{8});
     for(int i=0;i<n;++i){void* args[]{&i};if(void* child=Call(get,transform,args))result.push_back(child);}
     return result;
+}
+void* UniqueResourceChild(void* parent, const std::string& name) {
+    void* found = nullptr;
+    for (void* child : Children(parent)) {
+        if (Text(child, "get_name") != name) continue;
+        if (found) return nullptr;
+        found = child;
+    }
+    return found;
+}
+void* ResolvePropRoot(void* actor, void* prop, int scene, const std::string& rootName, const std::string& propName) {
+    if (!actor || !prop || !SupportedProp(rootName, propName) ||
+        SceneOf(GameObject(actor)) != scene || SceneOf(prop) != scene) return nullptr;
+    void* actorTransform = Call(On(actor, "get_transform"), actor);
+    void* propTransform = Call(On(prop, "get_transform"), prop);
+    if (!actorTransform || !propTransform) return nullptr;
+    void* root = Call(On(propTransform, "get_parent"), propTransform);
+    if (!root || UniqueResourceChild(root, propName) != propTransform) return nullptr;
+    void* parent = Call(On(root, "get_parent"), root);
+    if (!parent || UniqueResourceChild(parent, rootName) != root) return nullptr;
+    for (int depth = 0; parent && depth < scene_props::MaxPropDepth; ++depth) {
+        if (parent == actorTransform) return root;
+        parent = Call(On(parent, "get_parent"), parent);
+    }
+    return nullptr;
+}
+void* PropGeometry(void* root, int scene, const std::string& rootName, const std::string& propName) {
+    constexpr const char* geometryName = "Geo_Hknesuitcase";
+    if (!SupportedPropGeometry(rootName, propName, geometryName)) return nullptr;
+    void* node = UniqueResourceChild(root, geometryName);
+    void* go = node ? GameObject(node) : nullptr;
+    return go && SceneOf(go) == scene ? go : nullptr;
 }
 bool SafeSceneTarget(void* target) {
     if(!target)return false;
@@ -194,28 +214,55 @@ void TraceSuitcaseRenderers(void* actor) {
 std::vector<SceneResource> ScanResources() {
     std::vector<SceneResource> items;if(!PerformanceScene())return items;
     ClearResourceCandidates();++resourceGeneration_;if(!resourceGeneration_)++resourceGeneration_;
-    const int activeScene=ActiveSceneHandle();std::vector<void*> protectedTransforms;
-    for(void* actor:Objects(Class("Campus.Common","CampusActorController"))) {
-        void* go=GameObject(actor);if(!go||SceneOf(go)!=PerformanceScene()||!Bool(go,"get_activeInHierarchy"))continue;
-        const int id=Int(actor,"GetInstanceID");if(!id)continue;
-        const auto label=Text(go,"get_name");
-        RememberResource(items,{SceneResourceKind::ActorModel,id,id,PerformanceScene(),resourceGeneration_,label,ResourceHidden(id,SceneResourceKind::ActorModel)},actor);
-        void* transform=Call(On(go,"get_transform"),go);
-        protectedTransforms.push_back(transform);const auto roots=Children(transform);
-        for(void* root:roots) {
-            const auto rn=Text(root,"get_name");if(rn.size()<=5||rn.compare(0,5,"Root_"))continue;
-            if(std::count_if(roots.begin(),roots.end(),[&](void* r){return Text(r,"get_name")==rn;})!=1)continue;
-            const auto pn="Prop_"+rn.substr(5);if(!SupportedProp(rn,pn))continue;
-            void* found=nullptr;int matches=0;
-            for(void* prop:Children(root))if(Text(prop,"get_name")==pn){found=prop;++matches;}
-            if(matches!=1)continue;
-            void* propGo=GameObject(found);if(!propGo||SceneOf(propGo)!=PerformanceScene())continue;
-            const int propId=Int(propGo,"GetInstanceID");if(!propId)continue;
-            SceneResource item{SceneResourceKind::Prop,propId,propId,PerformanceScene(),resourceGeneration_,label+" / "+pn,ResourceHidden(propId,SceneResourceKind::Prop)};
-            item.active=Bool(propGo,"get_activeSelf");
-            RememberResource(items,std::move(item),propGo,actor,rn,pn);
-            if(pn=="Prop_Hknesuitcase")TraceSuitcaseRenderers(actor);
+    const int scene = PerformanceScene();
+    struct ActorNodes { void* actor; void* transform; std::string label; };
+    std::vector<ActorNodes> actors;
+    std::vector<void*> protectedTransforms;
+    for (void* actor : Objects(Class("Campus.Common", "CampusActorController"))) {
+        void* go = GameObject(actor);
+        if (!go || SceneOf(go) != scene || !Bool(go, "get_activeInHierarchy")) continue;
+        const int id = Int(actor, "GetInstanceID");
+        if (!id) continue;
+        auto label = Text(go, "get_name");
+        RememberResource(items, {SceneResourceKind::ActorModel, id, id, scene, resourceGeneration_,
+            label, ResourceHidden(id, SceneResourceKind::ActorModel)}, actor);
+        void* transform = Call(On(go, "get_transform"), go);
+        if (!transform) continue;
+        protectedTransforms.push_back(transform);
+        actors.push_back({actor, transform, std::move(label)});
+    }
+    const auto isOtherActor = [&](void* node) {
+        return std::find(protectedTransforms.begin(), protectedTransforms.end(), node) != protectedTransforms.end();
+    };
+    for (const auto& actor : actors) {
+        try {
+            for (const auto& match : scene_props::ScanActorProps(actor.transform,
+                [&](void* parent) { return Children(parent); },
+                [&](void* node) { return Text(node, "get_name"); }, isOtherActor)) {
+                const auto& [root, propTransform, rootName, propName] = match;
+                void* prop = GameObject(propTransform);
+                if (!prop || SceneOf(prop) != scene) continue;
+                const int propId = Int(prop, "GetInstanceID");
+                if (!propId) continue;
+                const auto displayName = scene_props::DisplayName(propName);
+                const auto label = actor.label + " / " + displayName +
+                    ((propName == "Prop_Microphone" || propName == "Prop_Hknesuitcase") ? " · " + propName : "");
+                SceneResource item{SceneResourceKind::Prop, propId, propId, scene, resourceGeneration_,
+                    label, ResourceHidden(propId, SceneResourceKind::Prop)};
+                item.active = Bool(prop, "get_activeSelf");
+                item.locked = propName == "Prop_Hknesuitcase" && !PropGeometry(root, scene, rootName, propName);
+                RememberResource(items, std::move(item), prop, actor.actor, rootName, propName);
+                if (propName == "Prop_Hknesuitcase") TraceSuitcaseRenderers(actor.actor);
+            }
+        } catch (const std::exception& e) {
+            Trace((std::string("Actor prop scan incomplete: ") + e.what()).c_str());
         }
+    }
+    int activeScene{};
+    try { activeScene = ActiveSceneHandle(); }
+    catch (const std::exception& e) {
+        Trace((std::string("Active scene unavailable: ") + e.what()).c_str());
+        return items;
     }
     for(void* camera:Objects(Class("UnityEngine","Camera"))) {
         void* go=GameObject(camera);if(!go||SceneOf(go)!=activeScene)continue;
@@ -265,6 +312,8 @@ bool SetResourceHidden(const SceneResource& item,bool hidden) {
     const auto candidate=std::find_if(resourceCandidates_.begin(),resourceCandidates_.end(),[&](const auto& c){return c.item.generation==item.generation&&c.item.kind==item.kind&&c.item.scene==item.scene&&c.item.instance==item.instance;});
     if(candidate==resourceCandidates_.end())return false;
     if(candidate->item.locked)return false;
+    if ((item.kind == SceneResourceKind::ActorModel || item.kind == SceneResourceKind::Prop) &&
+        item.scene != PerformanceScene()) return false;
     void* object=handleTarget_(candidate->handle);if(!object||Int(object,"GetInstanceID")!=item.instance)return false;
     if(item.kind==SceneResourceKind::ActorModel ? SceneOf(GameObject(object))!=item.scene : SceneOf(object)!=item.scene)return false;
     if((item.kind==SceneResourceKind::Background||item.kind==SceneResourceKind::Lighting||item.kind==SceneResourceKind::SceneNode)&&ActiveSceneHandle()!=item.scene)return false;
@@ -286,17 +335,11 @@ bool SetResourceHidden(const SceneResource& item,bool hidden) {
     void* propGeometry=nullptr;
     if(item.kind==SceneResourceKind::Prop) {
         void* actor=candidate->actorHandle?handleTarget_(candidate->actorHandle):nullptr;
-        if(!actor||SceneOf(GameObject(actor))!=item.scene)return false;
-        void* transform=Call(On(actor,"get_transform"),actor);void* root=nullptr;int roots=0;
-        for(void* node:Children(transform))if(Text(node,"get_name")==candidate->root){root=node;++roots;}
-        if(roots!=1)return false;
-        void* found=nullptr;int matches=0;
-        for(void* node:Children(root))if(Text(node,"get_name")==candidate->prop){found=GameObject(node);++matches;}
-        if(matches!=1||found!=object)return false;
-        if(candidate->root=="Root_Hknesuitcase"&&candidate->prop=="Prop_Hknesuitcase") {
-            int geometries=0;
-            for(void* node:Children(root))if(SupportedPropGeometry(candidate->root,candidate->prop,Text(node,"get_name"))){propGeometry=GameObject(node);++geometries;}
-            if(geometries!=1||!propGeometry||SceneOf(propGeometry)!=item.scene)return false;
+        void* root = ResolvePropRoot(actor, object, item.scene, candidate->root, candidate->prop);
+        if (!root) return false;
+        if (candidate->prop == "Prop_Hknesuitcase") {
+            propGeometry = PropGeometry(root, item.scene, candidate->root, candidate->prop);
+            if (!propGeometry) return false;
         }
     }
     if(!hidden)return RestoreResources(item.owner,item.kind,false);

@@ -2,7 +2,7 @@
 slint::slint! {
 #[edition = "1.19"]
 import { LineEdit, ComboBox, CheckBox, ListView, ScrollView, VerticalBox, HorizontalBox, SpinBox, Palette } from "std-widgets.slint";
-export struct Entry { key: string, label: string, detail: string, selected: bool, depth: int, expandable: bool, expanded: bool, hidden: bool, locked: bool, body: image, head: image, body-ready: bool, head-ready: bool, body-count: int, head-count: int, face-count: int, hair-count: int }
+export struct Entry { key: string, label: string, detail: string, tags: string, selected: bool, depth: int, expandable: bool, expanded: bool, hidden: bool, locked: bool, body: image, head: image, body-ready: bool, head-ready: bool, body-count: int, head-count: int, face-count: int, hair-count: int }
 export global ActorsTheme {
     out property <color> accent:#526c80;
     out property <color> text:#34475b;
@@ -354,17 +354,20 @@ export component Manager inherits Window {
               if !root.library-show-tasks: Button {text:"导入清单…";clicked=>{root.library-action("import", "");}}
               Button {text:"刷新";clicked=>{root.library-action("refresh", "");}}
             }
-            if !root.library-show-tasks: Note {text:"浏览、下载并导出游戏资源";}
             if !root.library-show-tasks: HorizontalLayout {height:36px;vertical-stretch:0;spacing:8px;
-              LineEdit {horizontal-stretch:1;placeholder-text:"搜索资源名称，例如 hski、mot_live";text <=> root.library-query;accepted=>{root.library-action("search", "");}}
+              LineEdit {horizontal-stretch:1;placeholder-text:"搜索文件名或标签，例如 花海咲季 发型、Live 舞台";text <=> root.library-query;accepted=>{root.library-action("search", "");}}
               Button {text:"搜索";clicked=>{root.library-action("search", "");}}
             }
             if !root.library-show-tasks: HorizontalLayout {spacing:12px;vertical-stretch:1;
               Panel {horizontal-stretch:3;VerticalLayout {padding:12px;spacing:8px;
-                HorizontalLayout {height:26px;vertical-stretch:0;Note {text:"资源名称";horizontal-stretch:1;} Note {text:"类型 · 大小 · 缓存状态";}}
+                HorizontalLayout {height:26px;vertical-stretch:0;Note {text:"资源名称与内容标签";horizontal-stretch:1;}}
                 library-list := ListView {horizontal-scrollbar-policy:always-off;
-                  for e in root.library-resources: Rectangle {width:Math.max(1px,library-list.visible-width - 12px);height:53px;background:e.selected ? ActorsTheme.selection : ActorsTheme.panel;border-color:ActorsTheme.line;border-width:1px;border-radius:6px;
-                    VerticalLayout {padding:7px;spacing:2px;Text {text:(e.selected ? "☑  " : "☐  ")+e.label;color:ActorsTheme.text;overflow:elide;font-size:13px;} Text {text:e.detail;color:ActorsTheme.muted;font-size:11px;overflow:elide;}}
+                  for e in root.library-resources: Rectangle {width:Math.max(1px,library-list.visible-width - 12px);height:72px;background:e.selected ? ActorsTheme.selection : ActorsTheme.panel;border-color:ActorsTheme.line;border-width:1px;border-radius:6px;
+                    VerticalLayout {padding:7px;spacing:2px;
+                      Text {text:(e.selected ? "☑  " : "☐  ")+e.label;color:ActorsTheme.text;overflow:elide;font-size:13px;}
+                      Text {text:e.tags;color:ActorsTheme.text;font-size:12px;overflow:elide;}
+                      Text {text:e.detail;color:ActorsTheme.muted;font-size:11px;overflow:elide;}
+                    }
                     TouchArea {clicked=>{root.library-action("select", e.key);}}
                   }
                 }

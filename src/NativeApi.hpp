@@ -12,6 +12,8 @@
 #include <cmath>
 #include <unordered_map>
 
+#include "ScenePropScan.hpp"
+
 namespace GakuActors {
 // IL2CPP calls are restricted to the loader's Unity-thread callbacks. No game
 // addresses, field offsets or managed objects are persisted in presets/UI.

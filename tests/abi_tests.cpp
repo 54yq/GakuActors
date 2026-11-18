@@ -14,7 +14,7 @@ int wmain(int argc,wchar_t** argv) {
     assert(query(1,sizeof(d),nullptr)==GAKU_E_INVALID_ARGUMENT);
     assert(query(1,sizeof(d),&d)==GAKU_OK);
     assert(std::strcmp(d.id,"gakuactors")==0&&d.activate&&d.onTick&&d.onDesktopUi&&d.shutdown);
-    assert(std::strcmp(d.version,"0.5.0-native-test")==0);
+    assert(std::strcmp(d.version,"0.5.1-native-test")==0);
     assert(d.onActorTick!=nullptr); // read-only scene admission, no private detour
     void* state=nullptr;assert(d.activate(nullptr,&state)==GAKU_E_INVALID_ARGUMENT&&state==nullptr);
     FreeLibrary(dll);std::cout<<"Plugin ABI query and independent lifecycle checks passed\n";

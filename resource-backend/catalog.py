@@ -1,4 +1,4 @@
-"""Octo manifest import and dependency planning; no game installation required."""
+"""Octo manifest import and dependency planning with GakuActors content labels."""
 from __future__ import annotations
 import hashlib
 import json
@@ -7,7 +7,9 @@ import re
 import sqlite3
 from contextlib import contextmanager
 import threading
-from collections import Counter, deque
+from collections import deque
+
+from content_tags import ContentTags, game_master_directory
 
 SCHEMA = 1
 CATEGORIES = {'model':'模型部件', 'texture':'图片与贴图', 'motion':'动作',
@@ -110,14 +112,34 @@ def decode_manifest(raw):
     return dict(format='gakumas-resource-catalog',schema=SCHEMA,revision=revision,entries=entries)
 
 class Catalog:
-    def __init__(self,root):
+    def __init__(self, root):
         self.root=Path(root).resolve(); self.root.mkdir(parents=True,exist_ok=True)
         self.db=self.root/'catalog.sqlite3'; self.lock=threading.RLock()
+        desktop = Path(__file__).resolve().parent.parent
+        self.content = ContentTags(game_master_directory(desktop))
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             db.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS entries (key TEXT PRIMARY KEY,section INTEGER,id INTEGER,name TEXT,size INTEGER,md5 TEXT,object_name TEXT,category TEXT,dependencies TEXT)')
             db.execute('CREATE INDEX IF NOT EXISTS entry_category ON entries(category)')
             db.execute('CREATE INDEX IF NOT EXISTS entry_name ON entries(name)')
+            db.execute('CREATE TABLE IF NOT EXISTS entry_content_tags (key TEXT PRIMARY KEY, tags TEXT NOT NULL, search_text TEXT NOT NULL)')
+            row = db.execute("SELECT value FROM meta WHERE key='active'").fetchone()
+            fingerprint = json.loads(row[0])['fingerprint'] if row else ''
+            signature = self.tag_signature(fingerprint)
+            indexed = db.execute("SELECT value FROM meta WHERE key='content_tags'").fetchone()
+            if not indexed or indexed[0] != signature:
+                self.index_tags(db, db.execute('SELECT key,name FROM entries'), signature)
+
+    def tag_signature(self, fingerprint):
+        return f'{self.content.signature}:{fingerprint}'
+
+    def index_tags(self, db, entries, signature):
+        db.execute('DELETE FROM entry_content_tags')
+        db.executemany('INSERT INTO entry_content_tags VALUES (?,?,?)',
+                       (self.content.index_row(key, name) for key, name in entries))
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('content_tags',?)", (signature,))
+
     @contextmanager
     def connect(self):
         db=sqlite3.connect(self.db,timeout=30); db.row_factory=sqlite3.Row
@@ -137,6 +159,7 @@ class Catalog:
             db.execute('DELETE FROM entries')
             db.executemany('INSERT INTO entries VALUES (?,?,?,?,?,?,?,?,?)',[
                 (e['key'],e['section'],e['id'],e['name'],e['size'],e['md5'],e['object_name'],e['category'],json.dumps(e['dependencies'])) for e in document['entries']])
+            self.index_tags(db, ((e['key'], e['name']) for e in document['entries']), self.tag_signature(fingerprint))
             db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',('active',json.dumps(metadata)))
         return self.summary()
     def summary(self):
@@ -148,18 +171,28 @@ class Catalog:
     @staticmethod
     def unpack(row):
         if row is None: raise CatalogError('资源不存在')
-        result=dict(row); result['dependencies']=json.loads(result['dependencies']); return result
+        result=dict(row); result['dependencies']=json.loads(result['dependencies'])
+        if 'tags' in result:
+            result['tags'] = json.loads(result['tags']) if result['tags'] else []
+        return result
+
     def get(self,key):
-        with self.lock,self.connect() as db: return self.unpack(db.execute('SELECT * FROM entries WHERE key=?',(key,)).fetchone())
+        with self.lock,self.connect() as db:
+            row = db.execute('SELECT e.*,t.tags FROM entries e LEFT JOIN entry_content_tags t ON e.key=t.key WHERE e.key=?', (key,)).fetchone()
+        return self.unpack(row)
+
     def search(self,query='',kind='',page=1):
         if kind and kind not in CATEGORIES: raise CatalogError('资源分类无效')
         page=max(1,int(page)); clauses=[]; args=[]
-        for word in query[:300].split(): clauses.append('instr(lower(name),?)>0'); args.append(word.lower())
-        if kind: clauses.append('category=?'); args.append(kind)
+        for word in query[:300].split():
+            clauses.append('(instr(lower(e.name),?)>0 OR instr(t.search_text,?)>0)')
+            args.extend((word.lower(), word.casefold()))
+        if kind: clauses.append('e.category=?'); args.append(kind)
         where=' WHERE '+' AND '.join(clauses) if clauses else ''
+        source = ' FROM entries e LEFT JOIN entry_content_tags t ON e.key=t.key'
         with self.lock,self.connect() as db:
-            total=db.execute('SELECT count(*) FROM entries'+where,args).fetchone()[0]
-            rows=db.execute('SELECT * FROM entries'+where+' ORDER BY name LIMIT 40 OFFSET ?',args+[(page-1)*40]).fetchall()
+            total = db.execute('SELECT count(*)' + source + where, args).fetchone()[0]
+            rows = db.execute('SELECT e.*,t.tags' + source + where + ' ORDER BY e.name,e.key LIMIT 40 OFFSET ?', args + [(page-1)*40]).fetchall()
         return dict(total=total,page=page,page_size=40,items=[self.unpack(r) for r in rows])
     def plan(self,keys):
         if not isinstance(keys,list) or not 1<=len(keys)<=100 or any(not isinstance(k,str) for k in keys):
