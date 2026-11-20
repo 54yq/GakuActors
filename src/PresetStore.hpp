@@ -41,7 +41,9 @@ public:
     }
     bool Save(Preset preset) {
         std::string error;
-        if(!writable_){notice="预设文件不可写，请先修复文件并重新读取";return false;}
+        WriteLock lock(file_);
+        if(!lock.Valid()){notice="预设文件暂时无法锁定";return false;}
+        if(!Load())return false;
         if(!ValidatePreset(preset,error)){notice=error;return false;}
         auto next=presets;
         auto found=std::find_if(next.begin(),next.end(),[&](const auto& p){return p.id==preset.id;});
@@ -54,7 +56,9 @@ public:
         presets=std::move(next);notice="人物预设已保存";return true;
     }
     bool Remove(const std::string& id) {
-        if(!writable_){notice="预设文件不可写";return false;}
+        WriteLock lock(file_);
+        if(!lock.Valid()){notice="预设文件暂时无法锁定";return false;}
+        if(!Load())return false;
         auto next=presets;
         next.erase(std::remove_if(next.begin(),next.end(),[&](const auto& p){return p.id==id;}),next.end());
         if(next.size()==presets.size())return false;
@@ -62,6 +66,22 @@ public:
         presets=std::move(next);notice="预设已删除，场景人物保持不变";return true;
     }
 private:
+    class WriteLock {
+        HANDLE handle_{INVALID_HANDLE_VALUE};
+    public:
+        explicit WriteLock(const std::filesystem::path& file) {
+            if(file.empty())return;
+            std::error_code ec;
+            std::filesystem::create_directories(file.parent_path(),ec);
+            if(ec)return;
+            auto lock=file;lock+=L".lock";
+            handle_=CreateFileW(lock.c_str(),GENERIC_WRITE,0,nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+        }
+        ~WriteLock(){if(Valid())CloseHandle(handle_);}
+        WriteLock(const WriteLock&)=delete;
+        WriteLock& operator=(const WriteLock&)=delete;
+        bool Valid()const{return handle_!=INVALID_HANDLE_VALUE;}
+    };
     bool Write(const std::vector<Preset>& values) {
         Json root{{"version",1},{"presets",Json::array()}};
         for(const auto& p:values)root["presets"].push_back(PresetJson(p));

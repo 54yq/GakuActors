@@ -47,7 +47,25 @@ impl Library {
    ui.set_library_selection(format!("已选择 {} 项资源",self.selection.len()).into());ui.set_library_can_plan(!self.selection.is_empty()&&!self.busy);ui.set_library_can_submit(self.plan.is_some()&&!self.busy);
    ui.set_library_plan(self.plan.as_ref().map(|p|format!("{} 个文件 · {}\n依赖完整，可以开始处理。",p["files"],bytes(p["total_bytes"].as_u64().unwrap_or(0)))).unwrap_or_else(||"选择资源后检查依赖和下载体积。".into()).into());
    ui.set_library_page(format!("{} / {} · {} 项",self.page,((self.total+39)/40).max(1),self.total).into());
-   ui.set_library_resources(model(self.items.iter().map(|e|{let k=text(e,"key");Entry{key:k.into(),label:text(e,"name").into(),detail:format!("{} · {} · {} · {} 个依赖{}",category_label(text(e,"category")),k,bytes(e["size"].as_u64().unwrap_or(0)),e["dependencies"].as_array().map_or(0,Vec::len),if e["cached"]==true{" · 发现缓存（使用时校验）"}else{""}).into(),selected:self.selection.contains_key(k),..Default::default()}}).collect()));
+   ui.set_library_resources(model(self.items.iter().map(|resource| {
+       let key = text(resource, "key");
+       let mut tags = resource["tags"].as_array()
+           .map(|tags| tags.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" · "))
+           .unwrap_or_default();
+       if tags.is_empty() {
+           tags = category_label(text(resource, "category")).to_owned();
+       }
+       Entry {
+           key: key.into(),
+           label: text(resource, "name").into(),
+           tags: tags.into(),
+           detail: format!("{} · {} · {} 个依赖{}", key, bytes(resource["size"].as_u64().unwrap_or(0)),
+               resource["dependencies"].as_array().map_or(0, Vec::len),
+               if resource["cached"] == true { " · 发现缓存（使用时校验）" } else { "" }).into(),
+           selected: self.selection.contains_key(key),
+           ..Default::default()
+       }
+   }).collect()));
    ui.set_library_jobs(model(self.jobs.iter().map(|j|{let k=text(j,"id");let names=j["selected_names"].as_array().map(|a|a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" · ")).unwrap_or_default();Entry{key:k.into(),label:names.into(),detail:format!("{} · {}/{} · {}",job_status(text(j,"status")),j["completed"],j["total"],text(j,"message")).into(),selected:self.job==k,..Default::default()}}).collect()));
    let job=self.jobs.iter().find(|j|text(j,"id")==self.job);let running=job.is_some_and(|j|matches!(text(j,"status"),"running"|"queued"));
    ui.set_library_can_cancel(running);ui.set_library_can_retry(job.is_some()&&!running&&!self.busy);ui.set_library_can_open(job.is_some_and(|j|!text(j,"output").is_empty() && std::path::Path::new(text(j,"output")).is_dir()));

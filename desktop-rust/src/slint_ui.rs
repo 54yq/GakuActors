@@ -2,7 +2,7 @@
 slint::slint! {
 #[edition = "1.19"]
 import { LineEdit, ComboBox, CheckBox, ListView, ScrollView, VerticalBox, HorizontalBox, SpinBox, Palette } from "std-widgets.slint";
-export struct Entry { key: string, label: string, detail: string, tags: string, selected: bool, depth: int, expandable: bool, expanded: bool, hidden: bool, locked: bool, body: image, head: image, body-ready: bool, head-ready: bool, body-count: int, head-count: int, face-count: int, hair-count: int }
+export struct Entry { key: string, label: string, detail: string, tags: string, group-header: bool, selected: bool, depth: int, expandable: bool, expanded: bool, hidden: bool, locked: bool, body: image, head: image, body-ready: bool, head-ready: bool, body-count: int, head-count: int, face-count: int, hair-count: int }
 export global ActorsTheme {
     out property <color> accent:#526c80;
     out property <color> text:#34475b;
@@ -98,10 +98,61 @@ component Gallery inherits ScrollView {
         entry: e; pair: root.pair; picked => {root.picked(e.key);}
     }
 }
+component AssetPanel inherits Panel {
+    in property <string> heading;
+    in property <string> scan-label;
+    in property <string> placeholder;
+    in property <[Entry]> items;
+    in property <bool> control-enabled;
+    in property <bool> scan-enabled;
+    in property <bool> note-writable;
+    in-out property <string> search;
+    in-out property <string> note;
+    in-out property <bool> expanded: true;
+    callback action(string, string);
+    callback searched();
+    VerticalLayout { padding:12px; spacing:8px;
+        Button { text:(root.expanded ? "▾ " : "▸ ") + root.heading; clicked=>{root.expanded=!root.expanded;} }
+        if root.expanded: HorizontalLayout { spacing:8px;
+            Button { text:"↻ " + root.scan-label; enabled:root.scan-enabled; clicked=>{root.action("scan-resources","");} }
+            LineEdit { text <=> root.search; placeholder-text:root.placeholder; horizontal-stretch:1; edited=>{root.searched();} }
+        }
+        if root.expanded && root.items.length == 0: Note { text:"没有匹配的资产。"; }
+        if root.expanded && root.items.length > 0: ListView {
+            min-height:120px; preferred-height:240px;
+            for e in root.items: Rectangle {
+                height:e.selected ? 78px : 36px;
+                background:e.selected || e.group-header ? ActorsTheme.selection : ActorsTheme.panel;
+                VerticalLayout { padding:4px; spacing:4px;
+                    HorizontalLayout { spacing:7px;
+                        Rectangle { width:Math.min(e.depth,8)*12px; }
+                        Button { text:e.expandable ? (e.expanded ? "▾" : "▸") : "·"; width:28px; enabled:e.expandable;
+                            accessible-label:(e.expanded ? "收起 " : "展开 ")+e.label; clicked=>{root.action("tree-toggle",e.key);} }
+                        Rectangle { horizontal-stretch:1;
+                            Text { text:e.label; color:ActorsTheme.text; overflow:elide; vertical-alignment:center; }
+                            TouchArea { clicked=>{root.action(e.group-header ? "tree-toggle" : "resource",e.key);} }
+                        }
+                        if e.tags!="": Note { text:e.tags; vertical-alignment:center; overflow:elide; max-width:200px; }
+                        if !e.group-header: Note { text:e.locked ? "受保护" : e.hidden ? "已隐藏" : "显示"; vertical-alignment:center; }
+                        if !e.group-header: CheckBox { text:"隐藏"; accessible-label:"隐藏 "+e.label; checked:e.hidden;
+                            enabled:root.control-enabled && !e.locked; toggled=>{root.action(self.checked ? "hide-row-on" : "hide-row-off",e.key);} }
+                    }
+                    if e.selected: HorizontalLayout { spacing:8px;
+                        Note { text:"我的备注"; vertical-alignment:center; }
+                        LineEdit { text <=> root.note; enabled:root.note-writable; placeholder-text:"为此项填写备注"; horizontal-stretch:1; }
+                        Button { text:"保存备注"; enabled:root.note-writable; clicked=>{root.action("save-note","");} }
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component Manager inherits Window {
     init=>{Palette.color-scheme=ColorScheme.light;}
     icon: @image-url("../../assets/scene-manager-window.png");
-    title: "GakuActors · 场景资源管理"; preferred-width: 1320px; preferred-height: 960px; min-width: 880px; min-height: 440px;
+    in property <string> desktop-version;
+    title: "GakuActors " + root.desktop-version + " · 场景资源管理"; preferred-width: 1320px; preferred-height: 960px; min-width: 880px; min-height: 440px;
     background: ActorsTheme.paper; default-font-family: "Microsoft YaHei UI"; default-font-size: 14px;
     in-out property <int> page: 0;
     in-out property <bool> settings: false;
@@ -110,12 +161,12 @@ export component Manager inherits Window {
     in property <bool> motion-present; in property <bool> can-scan-catalog; in property <bool> can-undo; in property <bool> actor-owned; in property <bool> pose-supported; in property <bool> save-ready; in property <bool> can-delete; in property <bool> can-hide;
     in property <bool> catalog-failed; in property <int> connection-state: 0; in property <string> connection-label: "正在检测游戏";
     in property <string> status: "等待游戏插件连接"; in property <string> notice; in property <string> detail; in property <string> selection;
-    in-out property <string> search; in-out property <string> resource-search; in-out property <string> preset-name;
+    in-out property <string> search; in-out property <string> resource-search; in-out property <string> fixed-search; in-out property <string> moving-search; in-out property <string> preset-name;
     in-out property <float> x-pos; in-out property <float> y-pos; in-out property <float> z-pos; in-out property <float> yaw-pos;
     in property <brush> color-preview: #00ff00; in-out property <string> resource-note; in property <bool> note-writable;
     in-out property <string> x-value; in-out property <string> y-value; in-out property <string> z-value; in-out property <string> yaw-value: "0";
     in-out property <bool> cross; in-out property <bool> raw-mode;
-    in property <[Entry]> characters; in property <[Entry]> presets; in property <[Entry]> bodies; in property <[Entry]> heads; in property <[Entry]> actors; in property <[Entry]> resources;
+    in property <[Entry]> characters; in property <[Entry]> presets; in property <[Entry]> bodies; in property <[Entry]> heads; in property <[Entry]> actors; in property <[Entry]> fixed-assets; in property <[Entry]> moving-assets;
     in property <[string]> references; in property <[string]> raw-bodies; in property <[string]> raw-faces; in property <[string]> raw-hairs;
     in-out property <int> reference-index: -1; in-out property <int> body-index: -1; in-out property <int> face-index: -1; in-out property <int> hair-index: -1;
     in-out property <int> stage-index: 0;
@@ -156,7 +207,7 @@ export component Manager inherits Window {
           Rectangle {width:root.width < 1100px ? 132px : 168px; background:ActorsTheme.aside;
             VerticalLayout {padding:12px;spacing:8px;
               Note {text:"工作区";height:26px;}
-              for label[index] in ["人物与预设", "场景人物", "场景管理", "道具管理", "舞台导入"]: NavButton {text:label;selected:root.page == (index == 4 ? 5 : index) || (root.page == 4 && index == 0);clicked=>{root.action("nav", index == 4 ? 5 : index);}}
+              for label[index] in ["人物与预设", "场景人物", "场景与道具", "舞台导入"]: NavButton {text:label;selected:root.page == (index == 3 ? 5 : index) || (root.page == 4 && index == 0);clicked=>{root.action("nav", index == 3 ? 5 : index);}}
               Rectangle {vertical-stretch:1;background:transparent;}
               Button {text:"打开乐库";clicked=>{root.action("music","");}}
               Note {text:"仅在拍摄 / Live 场景启用游戏操作";}
@@ -164,9 +215,16 @@ export component Manager inherits Window {
           }
           VerticalLayout {padding:16px;spacing:10px;
             HorizontalLayout {spacing:12px;
-              Caption {text:root.page == 4 ? "新建 / 编辑人物预设" : root.page == 0 ? "人物与预设" : root.page == 1 ? "当前场景人物" : root.page == 2 ? "场景管理" : root.page == 5 ? "舞台导入" : "道具管理";horizontal-stretch:1;}
+              Caption {text:root.page == 4 ? "新建 / 编辑人物预设" : root.page == 0 ? "人物与预设" : root.page == 1 ? "当前场景人物" : root.page == 5 ? "舞台导入" : "场景与道具";horizontal-stretch:1;}
               if root.page == 0 || root.page == 1: Button {text:"读取人物目录"; enabled:root.can-scan-catalog; clicked=>{root.action("scan", "");}}
-              if root.page == 0 || root.page == 1: Button {text:root.creation ? "停用人物加载" : "启用人物加载"; enabled:root.ready; clicked=>{root.action("creation", "");}}
+              if root.page == 0 || root.page == 1: HorizontalLayout {
+                  spacing: 8px;
+                  VerticalLayout {
+                      alignment: center;
+                      Rectangle { width: 10px; height: 10px; border-radius: 5px; background: root.creation ? #2e9b62 : #d84c4c; }
+                  }
+                  Button {text:root.creation ? "关闭人物加载" : "启用人物加载"; enabled:root.ready; clicked=>{root.action("creation", "");}}
+              }
             }
             Note { text: root.status; }
             if root.page == 0: HorizontalLayout { spacing: 14px;
@@ -259,13 +317,37 @@ export component Manager inherits Window {
                     } } }
                 }
             }
-            if root.page >= 1 && root.page <= 3: HorizontalLayout {spacing:14px;
+            if root.page==2: ScrollView { horizontal-scrollbar-policy:always-off; content-width:self.visible-width;
+                VerticalLayout { padding:10px; spacing:10px; alignment:start;
+                    Caption { text:"高级场景编辑"; }
+                    AssetPanel { heading:"固定资产"; scan-label:"扫描场景节点"; placeholder:"搜索场景节点或标签";
+                        items:root.fixed-assets; search <=> root.fixed-search; note <=> root.resource-note;
+                        scan-enabled:root.ready; control-enabled:root.ready && root.resource-enabled; note-writable:root.note-writable;
+                        action(a,b)=>{root.action(a,b);} searched=>{root.changed("fixed-search");} }
+                    AssetPanel { heading:"移动资产"; scan-label:"重新扫描道具"; placeholder:"搜索物品或部件";
+                        items:root.moving-assets; search <=> root.moving-search; note <=> root.resource-note;
+                        scan-enabled:root.ready; control-enabled:root.ready && root.resource-enabled; note-writable:root.note-writable;
+                        action(a,b)=>{root.action(a,b);} searched=>{root.changed("moving-search");} }
+                    Panel { VerticalLayout { padding:12px; spacing:8px;
+                        Caption { text:"纯色背景"; }
+                        HorizontalLayout { spacing:8px;
+                            Rectangle { width:42px; height:28px; background:root.color-preview; border-radius:4px; }
+                            Button { text:"选择背景颜色…"; clicked=>{root.action("choose-color","");} }
+                            Button { text:"启用纯色背景"; enabled:root.ready && root.resource-enabled; clicked=>{root.action("color","");} }
+                            Button { text:"恢复背景"; enabled:root.ready && root.resource-enabled; clicked=>{root.action("color-off","");} }
+                        }
+                    } }
+                }
+            }
+            if root.page == 1: HorizontalLayout {spacing:14px;
                 Panel {horizontal-stretch:1;min-width:0px;VerticalLayout {padding:14px;spacing:10px;
-                    HorizontalLayout {Caption {text:root.page==1?"场景中的人物":root.page==2?"场景节点":"道具列表";horizontal-stretch:1;} Button {text:root.page==1?"刷新":"扫描场景资源";enabled:root.ready;clicked=>{root.action(root.page==1?"scan-scene":"scan-resources","");}}}
-                    if root.page!=1: Note {text:"勾选隐藏，取消勾选恢复";}
-                    LineEdit {text <=> root.resource-search;placeholder-text:"按名称或备注筛选";edited=>{root.changed("resource-search");}}
+                    if root.page==1: HorizontalLayout {Caption {text:"场景中的人物";horizontal-stretch:1;} Button {text:"刷新";enabled:root.ready;clicked=>{root.action("scan-scene","");}}}
+                    HorizontalLayout {spacing:8px;
+                        if root.page!=1: Button {text:"↻ 重新扫描";enabled:root.ready;clicked=>{root.action("scan-resources","");}}
+                        LineEdit {text <=> root.resource-search;placeholder-text:root.page==1?"搜索人物":"搜索名称、标签或备注";horizontal-stretch:1;edited=>{root.changed("resource-search");}}
+                    }
                     ListView {
-                        for e in (root.page==1?root.actors:root.resources): Rectangle {height:root.page==1?68px:34px;background:e.selected?ActorsTheme.selection:white;clip:true;
+                        for e in root.actors: Rectangle {height:root.page==1?68px:34px;background:e.selected?ActorsTheme.selection:e.group-header?ActorsTheme.panel:white;clip:true;
                             HorizontalLayout {padding:6px;spacing:5px;
                                 Rectangle {width:Math.min(e.depth, 8)*14px;background:transparent;}
                                 if root.page!=1: Rectangle {width:24px;background:transparent;
@@ -274,11 +356,12 @@ export component Manager inherits Window {
                                     if e.expandable && !e.expanded: Path {x:6px;y:(parent.height - 12px)/2;width:12px;height:12px;viewbox-width:12;viewbox-height:12;fill:ActorsTheme.text;commands:"M 4 2 L 9 6 L 4 10 Z";}
                                     TouchArea {enabled:e.expandable;clicked=>{root.action("tree-toggle",e.key);}}
                                 }
-                                if root.page!=1: CheckBox {text:"";accessible-label:"隐藏 " + e.label;checked:e.hidden;enabled:root.ready && root.resource-enabled && !e.locked;toggled=>{root.action(self.checked ? "hide-row-on" : "hide-row-off",e.key);}}
+                                if root.page!=1 && !e.group-header: CheckBox {text:"";accessible-label:"隐藏 " + e.label;checked:e.hidden;enabled:root.ready && root.resource-enabled && !e.locked;toggled=>{root.action(self.checked ? "hide-row-on" : "hide-row-off",e.key);}}
                                 Rectangle {horizontal-stretch:1;min-width:0px;background:transparent;
                                     VerticalLayout {spacing:4px;Text {text:e.label;overflow:elide;color:ActorsTheme.text;min-width:0px;vertical-alignment:center;} if root.page==1: Note {text:e.detail;overflow:elide;}}
-                                    TouchArea {clicked=>{root.action(root.page==1?"actor":"resource",e.key);}}
+                                    TouchArea {clicked=>{root.action(e.group-header?"tree-toggle":root.page==1?"actor":"resource",e.key);}}
                                 }
+                                if root.page!=1 && e.tags!="": Note {text:e.tags;vertical-alignment:center;overflow:elide;max-width:220px;}
                             }
                         }
                     }
@@ -301,20 +384,6 @@ export component Manager inherits Window {
                         Button {text:"重置朝向";enabled:root.ready&&root.pose-supported;clicked=>{root.action("reset-yaw","");}}
                         Button {text:"人物模型显隐";enabled:root.can-hide;clicked=>{root.action("hide-actor","");}}
                         Button {text:"移除新增人物";enabled:root.ready&&root.actor-owned;clicked=>{root.action("remove","");}}
-                    }
-                    if root.page!=1: VerticalLayout {spacing:8px;
-                        Text {text:"我的备注";color:ActorsTheme.text;}
-                        LineEdit {min-width:0px;text <=> root.resource-note;enabled:root.note-writable;placeholder-text:"为此节点填写备注";}
-                        if root.selection!="" && !root.note-writable: Note {text:"当前节点路径无法唯一识别，暂不能保存备注。";}
-                        Button {text:"保存备注";enabled:root.note-writable;clicked=>{root.action("save-note","");}}
-                    }
-                    if root.page==2: VerticalLayout {spacing:8px;
-                        Caption {text:"纯色背景";}
-                        Rectangle {height:60px;background:root.color-preview;border-radius:5px;}
-                        Button {text:"选择背景颜色…";clicked=>{root.action("choose-color","");}}
-                        Note {text:"选中颜色将显示在上方，应用后生效。";}
-                        Button {text:"启用纯色背景";enabled:root.ready&&root.resource-enabled;clicked=>{root.action("color","");}}
-                        Button {text:"恢复背景";enabled:root.ready&&root.resource-enabled;clicked=>{root.action("color-off","");}}
                     }
                 } } }
             }

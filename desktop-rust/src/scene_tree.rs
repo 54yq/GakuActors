@@ -38,6 +38,82 @@ pub fn guess(name:&str)->Option<&'static str> {
     else {None}
 }
 
+pub fn function_tag(name: &str) -> Option<&'static str> {
+    let name = name.to_lowercase().replace(['_', '-', ' '], "");
+    [
+        (&["floodlight", "泛光灯"][..], "泛光灯"),
+        (&["bloom", "glow", "泛光"], "泛光"),
+        (&["colorgrading", "colorcorrection", "lutfilter", "调色"], "色彩分级"),
+        (&["filter", "滤镜"], "滤镜"),
+        (&["depthoffield", "dof", "景深"], "景深"),
+        (&["lensflare", "paraffin", "光晕"], "镜头光晕"),
+        (&["vignette", "暗角"], "暗角"),
+        (&["tonemap"], "色调映射"),
+        (&["motionblur"], "动态模糊"),
+        (&["truss", "lightrig", "lightframe", "灯架"], "灯架"),
+        (&["spotlight", "聚光灯"], "聚光灯"),
+        (&["pointlight"], "点光源"),
+        (&["decolight", "reallight", "lightfixture"], "舞台灯具"),
+        (&["ledscreen", "ledwall"], "舞台屏幕"),
+        (&["backdrop", "幕布"], "背景幕布"),
+        (&["decal"], "贴花"),
+        (&["trolley", "移动箱"], "移动箱"),
+        (&["dolly", "摄影车"], "轨道设备"),
+        (&["microphone", "麦克风"], "麦克风"),
+        (&["suitcase", "行李箱"], "行李箱"),
+    ].into_iter().find(|(names, _)| names.iter().any(|marker| name.contains(marker))).map(|(_, tag)| tag)
+}
+
+pub fn category(v: &Value) -> &'static str {
+    let name = str_field(v, "name");
+    match id(v, "kind") {
+        1 => "角色道具",
+        2 => "背景与装饰",
+        3 => "灯光与后处理",
+        _ => match function_tag(name) {
+            Some("贴花" | "背景幕布" | "舞台屏幕") => "背景与装饰",
+            Some("泛光灯" | "泛光" | "色彩分级" | "滤镜" | "景深" | "镜头光晕" | "暗角" |
+                "色调映射" | "动态模糊" | "灯架" | "聚光灯" | "点光源" | "舞台灯具") => "灯光与后处理",
+            _ => "舞台结构",
+        },
+    }
+}
+
+/// Keep native resource identities and hide duplicate scene rows for recognized props.
+pub fn separated_resources(resources: &[Value]) -> Vec<Value> {
+    let moving: HashSet<_> = resources.iter().filter(|v| id(v, "kind") == 1)
+        .map(|v| (id(v, "scene"), id(v, "instance"))).collect();
+    let parents: HashMap<_, _> = resources.iter().filter(|v| id(v, "kind") >= 2)
+        .map(|v| ((id(v, "scene"), id(v, "instance")), id(v, "parent"))).collect();
+    let mut protected = HashSet::new();
+    for &(scene, prop) in &moving {
+        let mut current = prop;
+        for _ in 0..128 {
+            let Some(&parent) = parents.get(&(scene, current)) else { break };
+            if parent == 0 || !protected.insert((scene, parent)) { break; }
+            current = parent;
+        }
+    }
+    resources.iter().filter_map(|v| {
+        if id(v, "kind") < 2 { return Some(v.clone()); }
+        let scene = id(v, "scene");
+        let instance = id(v, "instance");
+        let mut current = instance;
+        for _ in 0..128 {
+            if moving.contains(&(scene, current)) { return None; }
+            let Some(&parent) = parents.get(&(scene, current)) else { break };
+            if parent == 0 { break; }
+            current = parent;
+        }
+        let mut row = v.clone();
+        if protected.contains(&(scene, instance)) {
+            row["locked"] = true.into();
+            row["contains_moving_asset"] = true.into();
+        }
+        Some(row)
+    }).collect()
+}
+
 /// Build visible rows for either the scene tree or props. Expanding and search
 /// are view-only. Search retains all ancestors and temporarily expands matches.
 pub fn build(resources:&[Value],scene_name:&str,props:bool,collapsed:&HashSet<String>,query:&str,notes:&BTreeMap<String,String>)->Vec<TreeRow> {
@@ -62,7 +138,7 @@ pub fn build(resources:&[Value],scene_name:&str,props:bool,collapsed:&HashSet<St
     let keys:Vec<String>=items.iter().enumerate().map(|(i,v)|stable[i].clone().unwrap_or_else(||format!("runtime:{}:{}",id(v,"scene"),id(v,"instance")))).collect();
     let q=query.trim().to_lowercase();let mut included=vec![q.is_empty();n];
     if !q.is_empty() {for i in 0..n {let v=&items[i];let note=stable[i].as_ref().and_then(|k|notes.get(k)).map(String::as_str).unwrap_or("");
-        let candidate=format!("{} {} {}",str_field(v,"name"),guess(str_field(v,"name")).unwrap_or(""),note).to_lowercase();
+        let candidate=format!("{} {} {} {} {}",str_field(v,"name"),category(v),guess(str_field(v,"name")).unwrap_or(""),function_tag(str_field(v,"name")).unwrap_or(""),note).to_lowercase();
         if candidate.contains(&q){let mut cur=Some(i);while let Some(x)=cur{if included[x]{break;}included[x]=true;cur=parent[x];}}
     }}
     fn walk(i:usize,depth:usize,items:&[Value],children:&[Vec<usize>],stable:&[Option<String>],keys:&[String],included:&[bool],collapsed:&HashSet<String>,q:&str,notes:&BTreeMap<String,String>,out:&mut Vec<TreeRow>) {
@@ -101,11 +177,24 @@ fn replace_file(from:&Path,to:&Path)->io::Result<()> {fs::rename(from,to)}
 /// the same directory, syncs it, then replaces the target atomically.
 pub fn save_notes(path:&Path,notes:&BTreeMap<String,String>)->io::Result<()> {
     if notes.len()>10000||notes.iter().any(|(k,v)|k.len()>4096||v.len()>1024||v.chars().any(char::is_control)){return Err(io::Error::new(io::ErrorKind::InvalidInput,"备注内容无效"));}
-    let parent=path.parent().ok_or_else(||io::Error::new(io::ErrorKind::InvalidInput,"备注路径无效"))?;fs::create_dir_all(parent)?;
-    let nonce=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();let temp=path.with_extension(format!("{}.{}.tmp",std::process::id(),nonce));
-    let result=(||{let mut f=OpenOptions::new().create_new(true).write(true).open(&temp)?;let bytes=serde_json::to_vec(&json!({"version":1,"notes":notes})).map_err(io::Error::other)?;if bytes.len()>2*1024*1024{return Err(io::Error::new(io::ErrorKind::InvalidInput,"备注文件过大"));}f.write_all(&bytes)?;f.sync_all()?;drop(f);replace_file(&temp,path)})();
-    if result.is_err(){let _=fs::remove_file(temp);}result
+    let bytes=serde_json::to_vec(&json!({"version":1,"notes":notes})).map_err(io::Error::other)?;
+    if bytes.len()>2*1024*1024{return Err(io::Error::new(io::ErrorKind::InvalidInput,"备注文件过大"));}
+    write_atomic(path, &bytes)
 }
+
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "保存路径无效"))?;
+    fs::create_dir_all(parent)?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let temp = path.with_extension(format!("{}.{}.tmp", std::process::id(), nonce));
+    let mut file = OpenOptions::new().create_new(true).write(true).open(&temp)?;
+    let result = file.write_all(bytes).and_then(|_| file.sync_all());
+    drop(file);
+    let result = result.and_then(|_| replace_file(&temp, path));
+    if result.is_err() { let _ = fs::remove_file(temp); }
+    result
+}
+
 #[cfg(test)]mod tests {
     use super::*;
     fn node(id:i32,parent:i32,name:&str)->Value {json!({"scene":10,"generation":1,"kind":4,"instance":id,"parent":parent,"name":name})}
@@ -118,6 +207,20 @@ pub fn save_notes(path:&Path,notes:&BTreeMap<String,String>)->io::Result<()> {
         assert_ne!(build(&nodes,"Other",false,&HashSet::new(),"",&notes)[2].note_key,stable);
     }
     #[test] fn guess_does_not_match_unrelated_words(){assert_eq!(guess("street"),None);assert_eq!(guess("highlight"),None);assert_eq!(guess("mdl_env_stg-parts"),Some("舞台"));}
+    #[test]
+    fn moving_props_are_not_fixed_rows_and_protect_shared_ancestors() {
+        let prop = json!({"scene":10,"generation":1,"kind":1,"instance":2,"name":"Prop_Microphone"});
+        let resources = separated_resources(&[node(1,0,"Stage"),node(2,1,"Prop_Microphone"),
+            node(3,2,"MicrophoneMesh"),node(4,1,"PostEffect_Bloom"),prop]);
+        assert_eq!(resources.len(), 3);
+        assert_eq!(resources[0]["locked"], true);
+        assert_eq!(resources[0]["contains_moving_asset"], true);
+        assert_eq!(category(&resources[1]), "灯光与后处理");
+        let fixed = build(&resources, "Live", false, &HashSet::new(), "泛光", &BTreeMap::new());
+        assert_eq!(fixed.len(), 2);
+        let props = build(&resources, "Live", true, &HashSet::new(), "麦克风", &BTreeMap::new());
+        assert_eq!(props.len(), 1);
+    }
     #[test] fn ambiguous_paths_are_not_persisted(){let nodes=vec![node(1,0,"Same"),node(2,0,"Same")];let rows=build(&nodes,"Live",false,&HashSet::new(),"",&BTreeMap::new());assert!(rows.iter().all(|x|x.note_key.is_none()));assert!(build(&nodes,"",false,&HashSet::new(),"",&BTreeMap::new()).iter().all(|x|x.note_key.is_none()));}
     #[test] fn note_storage_roundtrip_and_rejects_corruption(){let nonce=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();let dir=std::env::current_dir().unwrap().join("target").join(format!("gaku-scene-notes-{}-{nonce}",std::process::id()));fs::create_dir_all(&dir).unwrap();let path=dir.join("notes.json");let mut v=load_notes(&path).unwrap();v.insert("scene/path".into(),"桌椅".into());save_notes(&path,&v).unwrap();assert_eq!(load_notes(&path).unwrap(),v);v.insert("other".into(),"舞台".into());save_notes(&path,&v).unwrap();assert_eq!(load_notes(&path).unwrap(),v);fs::write(&path,b"broken").unwrap();assert!(load_notes(&path).is_err());fs::remove_file(path).unwrap();fs::remove_dir(dir).unwrap();}
 }

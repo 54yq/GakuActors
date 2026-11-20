@@ -219,7 +219,9 @@ int main() {
     check(store.Save(normal));check(store.Save(special));check(store.Save(raw));check(store.presets.size()==3);
     PresetStore loaded;loaded.SetFile(file);check(loaded.Load());check(loaded.presets[0].name==normal.name);
     normal.name="改名后的预设";check(loaded.Save(normal));check(loaded.presets.size()==3);check(loaded.presets[0].name==normal.name);
+    normal.name="外部更新后的预设";check(store.Save(normal));
     check(loaded.Remove(special.id));check(loaded.presets.size()==2);
+    check(loaded.presets[0].name==normal.name);
     auto prior=loaded.presets;
     {std::ofstream corrupt(file,std::ios::binary);corrupt<<"{broken";}
     check(!loaded.Load());check(loaded.presets.size()==prior.size());check(!loaded.Writable());check(!loaded.Save(normal));
@@ -327,6 +329,6 @@ int main() {
     raw.character="hski";raw.bodyAsset="mdl_chr_nasr-casl-0000_body";
     check(ValidatePreset(raw,error)); // classification never restricts model identity
     // This test owns exactly these files; no recursive deletion or user paths.
-    std::filesystem::remove(file);std::filesystem::remove(root/L"stage_choice.json");std::filesystem::remove(root/L"stage_bad.json");std::filesystem::remove(root);
+    std::filesystem::remove(file);auto lockFile=file;lockFile+=L".lock";std::filesystem::remove(lockFile);std::filesystem::remove(root/L"stage_choice.json");std::filesystem::remove(root/L"stage_bad.json");std::filesystem::remove(root);
     std::cout<<checks<<" preset validation, Unicode persistence, corruption and catalogue checks passed\n";
 }

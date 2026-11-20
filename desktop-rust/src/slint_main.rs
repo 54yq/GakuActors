@@ -3,6 +3,7 @@
 #[path="main.rs"] #[allow(dead_code)] mod legacy;
 mod slint_ui;
 mod offline_catalog;
+mod offline_presets;
 mod color_dialog;
 mod scene_tree;
 mod people_catalog;
@@ -82,22 +83,36 @@ fn image(b:Option<legacy::thumbnail::Bitmap>)->Image {
     Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&rgba,b.width,b.height))
 }
 #[derive(Clone,Default)] struct Pictures{body:Image,head:Image}
-enum Work {Reconnect,Command(Value),Picture(String,Value),SaveNotes(std::path::PathBuf,BTreeMap<String,String>)}
-enum Event {IconsUpdated,Snapshot(Value),Picture(String,Option<legacy::thumbnail::Bitmap>,Option<legacy::thumbnail::Bitmap>),ScanRejected,NotesSaved(Result<(),String>),Probe(String),RetryFailed(String),Connected,Disconnected}
+enum Work {Reconnect,ReadCatalog,Command(Value),Picture(String,Value),SaveNotes(std::path::PathBuf,BTreeMap<String,String>)}
+enum Event {IconsUpdated,Snapshot(Value),Picture(String,Option<legacy::thumbnail::Bitmap>,Option<legacy::thumbnail::Bitmap>),CatalogRead(Result<String,String>),PresetWriteFailed(String),NotesSaved(Result<(),String>),Probe(String),RetryFailed(String),Connected,Disconnected}
+
+fn offline_snapshot(game: Option<&std::path::Path>) -> Value {
+    let mut snapshot = json!({"status":"等待游戏和 GakuActors 插件","runtime":false});
+    if let Some(game) = game {
+        match offline_presets::load(game) {
+            Ok(presets) => {
+                snapshot["presets"] = presets.into();
+                snapshot["writable"] = true.into();
+            }
+            Err(error) => snapshot["store_notice"] = error.into(),
+        }
+    }
+    snapshot
+}
 
 // One pipe owner. Commands are drained before thumbnail work; memory and queues
 // are bounded. No UI callback performs I/O or decodes images.
 fn worker(mut client:Option<legacy::pipe::Client>,rx:mpsc::Receiver<Work>,tx:mpsc::SyncSender<Event>){
     let mut commands=VecDeque::new();let mut pictures=VecDeque::new();let mut pending:Option<(String,String,Instant,(String,String))>=None;
-    let mut snapshot=json!({"status":"等待游戏和 GakuActors 插件","runtime":false});let mut previous=Value::Null;let mut attempted=false;let mut reconnect_requested=false;let mut manual_retry=false;let mut retry_at=Instant::now();let mut probe_notice=String::new();let mut reader=None;let mut reader_failed=false;
-    let game=legacy::music::game_root().ok();let mut catalog=game.as_deref().map(offline_catalog::load).unwrap_or(Value::Null);let mut saved_revision=0;let mut saved_shape=(0usize,0usize);let mut saved_at=Instant::now()-Duration::from_secs(3);
+    let mut previous=Value::Null;let mut attempted=false;let mut reconnect_requested=false;let mut manual_retry=false;let mut retry_at=Instant::now();let mut probe_notice=String::new();let mut reader=None;let mut reader_failed=false;
+    let game=legacy::music::game_root().ok();let mut snapshot=offline_snapshot(game.as_deref());let mut catalog=game.as_deref().map(offline_catalog::load).unwrap_or(Value::Null);let mut saved_revision=0;let mut saved_shape=(0usize,0usize);let mut saved_at=Instant::now()-Duration::from_secs(3);
     if client.is_some(){let _=tx.send(Event::Connected);}
     let (index_tx,index_rx)=mpsc::channel();if let Some(game)=game.clone(){let missing=catalog.is_null();if missing || offline_catalog::needs_prefetch(&game){std::thread::spawn(move||{if missing{let _=legacy::icons::build_index(&game);let _=index_tx.send(());}let _=legacy::icons::background_prefetch(&game);let _=index_tx.send(());});}}
     loop {
         if client.is_none()&&Instant::now()>=retry_at {
             let result=game.as_deref().ok_or_else(||std::io::Error::new(std::io::ErrorKind::NotFound,"未配置游戏目录；资源库与导出仍可使用")).and_then(legacy::pipe::Client::connect_game);
             retry_at=Instant::now()+Duration::from_secs(2);
-            match result {Ok(value)=>{client=Some(value);attempted=false;manual_retry=false;probe_notice.clear();previous=Value::Null;let _=tx.send(Event::Connected);},
+            match result {Ok(value)=>{client=Some(value);commands.push_front(json!({"version":1,"action":"reload"}));attempted=false;manual_retry=false;probe_notice.clear();previous=Value::Null;let _=tx.send(Event::Connected);},
                 Err(error)=>{let notice=error.to_string();if notice!=probe_notice&&tx.try_send(Event::Probe(notice.clone())).is_ok(){probe_notice=notice.clone();}if manual_retry{manual_retry=false;let _=tx.send(Event::RetryFailed(notice));}}
             }
         }
@@ -107,11 +122,29 @@ fn worker(mut client:Option<legacy::pipe::Client>,rx:mpsc::Receiver<Work>,tx:mps
         if commands.len()<=16 {incoming.extend(rx.try_iter().take(64));}
         for w in incoming {match w {
             Work::Reconnect=>{reconnect_requested=true;},
+            Work::ReadCatalog=>{
+                let result = game.as_deref().ok_or_else(|| "未配置游戏安装目录。".to_owned()).and_then(|game| {
+                    catalog = offline_catalog::load(game);
+                    if catalog.is_null() {
+                        legacy::icons::build_index(game)?;
+                        catalog = offline_catalog::load(game);
+                    }
+                    let count = |key| catalog[key].as_array().map_or(0, Vec::len);
+                    if count("bodies") == 0 || count("heads") == 0 {
+                        return Err("游戏安装目录中没有可用的身体和头部目录。".into());
+                    }
+                    reader = None;
+                    reader_failed = false;
+                    Ok(format!("已读取本地目录 · 身体 {} · 头部 {}", count("bodies"), count("heads")))
+                });
+                let _=tx.send(Event::IconsUpdated);
+                let _=tx.send(Event::CatalogRead(result));
+            },
             Work::SaveNotes(path,notes)=>{let result=scene_tree::save_notes(&path,&notes).map_err(|e|e.to_string());let _=tx.send(Event::NotesSaved(result));},
             Work::Command(v)=>{if (v["action"]=="move"||v["action"]=="set_yaw")&&commands.back().is_some_and(|p:&Value|p["action"]==v["action"]&&p["instance"]==v["instance"]){commands.pop_back();}commands.push_back(v);},
             Work::Picture(k,v)=>{if pictures.len()<64{pictures.push_back((k,v));}else{let _=tx.send(Event::Picture(k,None,None));}}
         }}
-        if reconnect_requested&&commands.is_empty()&&pending.is_none(){reconnect_requested=false;manual_retry=true;client=None;attempted=false;probe_notice.clear();retry_at=Instant::now();snapshot=json!({"status":"正在重新连接游戏插件","runtime":false});previous=Value::Null;let _=tx.send(Event::Disconnected);continue;}
+        if reconnect_requested&&commands.is_empty()&&pending.is_none(){reconnect_requested=false;manual_retry=true;client=None;attempted=false;probe_notice.clear();retry_at=Instant::now();snapshot=offline_snapshot(game.as_deref());previous=Value::Null;let _=tx.send(Event::Disconnected);continue;}
         if pending.as_ref().is_some_and(|p|p.2.elapsed()>Duration::from_secs(5)){if let Some(p)=pending.take(){let _=tx.send(Event::Picture(p.0,None,None));}}
         let request=if let Some(v)=commands.pop_front(){v}else if pending.is_some(){json!({"version":1,"action":"thumbnail_status"})}else if let Some((k,v))=pictures.pop_front(){
             let visible=offline_catalog::merge(&snapshot,&catalog);let names=legacy::icons::names(&visible,&v);
@@ -120,10 +153,21 @@ fn worker(mut client:Option<legacy::pipe::Client>,rx:mpsc::Receiver<Work>,tx:mps
             let wire=if v["action"]=="load_thumbnail"{s(&v,"preset_id").to_owned()}else{format!("part:{}:{}",s(&v,"kind"),s(&v,"part_id"))};pending=Some((k,wire,Instant::now(),names));v
         }else{json!({"version":1,"action":"snapshot"})};
         let Some(pipe)=client.as_mut() else {
-            if request["action"]!="snapshot" {if request["action"]=="read_pre_live_catalog"{let _=tx.send(Event::ScanRejected);}}
+            if matches!(request["action"].as_str(), Some("save_preset" | "delete_preset")) {
+                let result = game.as_deref().ok_or_else(|| "未配置游戏安装目录。".to_owned())
+                    .and_then(|game| offline_presets::update(game, &request));
+                match result {
+                    Ok(presets) => {
+                        snapshot["presets"] = presets.into();
+                        snapshot["writable"] = true.into();
+                        snapshot["store_notice"] = if request["action"] == "delete_preset" {"预设已删除。"} else {"预设已保存。"}.into();
+                    }
+                    Err(error) => { let _ = tx.send(Event::PresetWriteFailed(error)); }
+                }
+            }
             let visible=offline_catalog::merge(&snapshot,&catalog);if visible!=previous&&tx.try_send(Event::Snapshot(visible.clone())).is_ok(){previous=visible;}continue;
         };
-        let mut reply=match pipe.request(&request){Ok(v)=>v,Err(_)=>{client=None;attempted=false;pending=None;commands.clear();pictures.clear();snapshot=json!({"status":"等待游戏和 GakuActors 插件","runtime":false});previous=Value::Null;let _=tx.send(Event::Disconnected);continue;}};
+        let mut reply=match pipe.request(&request){Ok(v)=>v,Err(_)=>{client=None;attempted=false;pending=None;commands.clear();pictures.clear();snapshot=offline_snapshot(game.as_deref());previous=Value::Null;let _=tx.send(Event::Disconnected);continue;}};
         if let Some(v)=reply.get("snapshot"){snapshot=v.clone();if !attempted&&flag(&snapshot,"runtime")&&!flag(&snapshot,"busy")&&!flag(&snapshot,"faulted"){attempted=true;commands.push_back(json!({"version":1,"action":"read_pre_live_catalog"}));}let rev=snapshot["catalog_revision"].as_u64().unwrap_or(0);let shape=(snapshot["resources"].as_array().map_or(0,|v|v.len()),snapshot["models"].as_array().map_or(0,|v|v.len()));if rev>0&&(rev!=saved_revision||(shape!=saved_shape&&saved_at.elapsed()>=Duration::from_secs(3))){if let Some(game)=game.as_deref(){offline_catalog::save(game,&snapshot);catalog=offline_catalog::load(game);}saved_revision=rev;saved_shape=shape;saved_at=Instant::now();}}
         if matches!(request["action"].as_str(),Some("load_thumbnail"|"load_part_thumbnail"))&&reply["accepted"]!=true {
             if let Some(p)=pending.take(){let _=tx.send(Event::Picture(p.0,None,None));}
@@ -137,7 +181,6 @@ fn worker(mut client:Option<legacy::pipe::Client>,rx:mpsc::Receiver<Work>,tx:mps
                 }
             }
         }
-        if reply["accepted"]==false&&request["action"]=="read_pre_live_catalog"{let _=tx.send(Event::ScanRejected);}
         if reply["accepted"]==false&&!matches!(request["action"].as_str(),Some("thumbnail_status"|"load_thumbnail"|"load_part_thumbnail")){snapshot["notice"]="操作未通过游戏插件校验，请刷新后重试。".into();}
         if let Some(map)=reply.as_object_mut(){map.remove("thumbnail");}
         let visible=offline_catalog::merge(&snapshot,&catalog);if visible!=previous {if tx.try_send(Event::Snapshot(visible.clone())).is_ok(){previous=visible;}}
@@ -162,11 +205,11 @@ fn visibility_request(r:&Value,hidden:bool)->Option<Value>{
 struct State {
     snapshot:Value,tx:Option<mpsc::SyncSender<Work>>,connected:bool,connection_detail:String,character:String,preset:String,actor:String,resource:String,
     body:String,head:String,edit_id:String,raw:[Vec<String>;3],cache:HashMap<String,Pictures>,lru:VecDeque<String>,requested:HashSet<String>,
-    tree_rows:Vec<scene_tree::TreeRow>,collapsed:HashSet<String>,notes:BTreeMap<String,String>,notes_path:Option<std::path::PathBuf>,notes_error:bool,yaw_dirty:bool,
-    pages:[usize;3],catalog_scan:Option<(u64,Instant)>,reference:i64,stage_initialized:bool,confirm:Option<Value>,undo:Option<Value>,save:Option<(Value,Instant)>,message:String,pose_dirty:bool,reset:Option<(i64,u64)>,reset_yaw:Option<(i64,u64)>,
+    tree_rows:Vec<scene_tree::TreeRow>,asset_scan_on_open:bool,collapsed:HashSet<String>,notes:BTreeMap<String,String>,notes_path:Option<std::path::PathBuf>,notes_error:bool,yaw_dirty:bool,
+    pages:[usize;3],catalog_scan:bool,game_configured:bool,reference:i64,stage_initialized:bool,confirm:Option<Value>,undo:Option<Value>,save:Option<(Value,Instant)>,message:String,pose_dirty:bool,reset:Option<(i64,u64)>,reset_yaw:Option<(i64,u64)>,
 }
 impl State {
-    fn send(&mut self,mut v:Value){v["version"]=1.into();if let Some(tx)=&self.tx {if tx.try_send(Work::Command(v)).is_err(){self.message="操作队列忙，请稍后重试。".into();}}else{self.message="游戏插件未连接。".into();}}
+    fn send(&mut self,mut v:Value){if !self.connected&&!matches!(v["action"].as_str(),Some("save_preset"|"delete_preset")){return;}v["version"]=1.into();if let Some(tx)=&self.tx {if tx.try_send(Work::Command(v)).is_err(){self.message="操作队列忙，请稍后重试。".into();}}else{self.message="游戏插件未连接。".into();}}
     fn request(&mut self,k:String,v:Value){if self.cache.contains_key(&k){self.lru.retain(|x|x!=&k);self.lru.push_back(k);return;}if self.requested.contains(&k){return;}if let Some(tx)=&self.tx{if tx.try_send(Work::Picture(k.clone(),v)).is_ok(){self.requested.insert(k);}}}
     fn picture(&mut self,k:String,a:Option<legacy::thumbnail::Bitmap>,b:Option<legacy::thumbnail::Bitmap>){
         self.requested.remove(&k);if !self.cache.contains_key(&k)&&self.cache.len()>=CACHE {if let Some(old)=self.lru.pop_front(){self.cache.remove(&old);}}
@@ -180,19 +223,18 @@ impl State {
     }
     fn part_rows(&self,ui:&Manager,kind:&str)->Vec<Value>{rows(&self.snapshot,kind).into_iter().filter(|v|ui.get_cross()||s(v,"character")==self.character).collect()}
     fn actor_value(&self)->Option<Value>{rows(&self.snapshot,"actors").into_iter().find(|v|key(v)==self.actor)}
-    fn resource_value(&self)->Option<Value>{rows(&self.snapshot,"scene_resources").into_iter().find(|v|key(v)==self.resource)}
+    fn resource_value(&self)->Option<Value>{scene_tree::separated_resources(&rows(&self.snapshot,"scene_resources")).into_iter().find(|v|key(v)==self.resource)}
     fn position(&self,ui:&Manager,a:&Value){let p=&a["position"];let x=p[0].as_f64().unwrap_or(0.0);let y=p[1].as_f64().unwrap_or(0.0);let z=p[2].as_f64().unwrap_or(0.0);ui.set_x_value(format!("{x:.2}").into());ui.set_y_value(format!("{y:.2}").into());ui.set_z_value(format!("{z:.2}").into());ui.set_x_pos(x as f32);ui.set_y_pos(y as f32);ui.set_z_pos(z as f32);}
     fn render(&mut self,ui:&Manager){
-        let admitted=flag(&self.snapshot,"admitted");let ready=admitted&&!flag(&self.snapshot,"busy")&&!flag(&self.snapshot,"playing")&&!flag(&self.snapshot,"faulted");
+        let admitted=self.connected&&flag(&self.snapshot,"admitted");let ready=admitted&&!flag(&self.snapshot,"busy")&&!flag(&self.snapshot,"playing")&&!flag(&self.snapshot,"faulted");
         ui.set_live_pause_available(flag(&self.snapshot,"live_pause_available"));ui.set_live_paused(flag(&self.snapshot,"live_paused"));ui.set_live_pause_owned(flag(&self.snapshot,"live_pause_owned"));ui.set_in_live(flag(&self.snapshot,"in_live"));ui.set_live_pause_status(s(&self.snapshot,"live_pause_status").into());
-        ui.set_admitted(admitted);ui.set_ready(ready);ui.set_writable(flag(&self.snapshot,"writable"));ui.set_creation(flag(&self.snapshot,"creation_enabled"));ui.set_resource_enabled(flag(&self.snapshot,"resource_enabled"));ui.set_motion_present(flag(&self.snapshot,"motion_conflict")||flag(&self.snapshot,"motion_handoff_available")||flag(&self.snapshot,"motion_handoff_requested"));ui.set_resource_pending(flag(&self.snapshot,"resource_enable_pending"));ui.set_camera_active(flag(&self.snapshot,"free_camera_active"));
-        if let Some((revision,started))=self.catalog_scan {if self.snapshot["prelive_catalog_revision"].as_u64().unwrap_or(0)>revision {self.message=catalog_notice(s(&self.snapshot,"prelive_catalog_status"));self.catalog_scan=None;}else if started.elapsed()>Duration::from_secs(15){self.message="读取目录尚未完成，请确认游戏运行状态后重试。".into();self.catalog_scan=None;}}
-        let issue=flag(&self.snapshot,"faulted")||flag(&self.snapshot,"busy")||!flag(&self.snapshot,"runtime")||s(&self.snapshot,"prelive_catalog_status").contains("失败")||self.message.contains("未被接受")||self.message.contains("尚未完成")||self.catalog_scan.is_some();
+        ui.set_admitted(admitted);ui.set_ready(ready);ui.set_writable(flag(&self.snapshot,"writable"));ui.set_creation(self.connected&&flag(&self.snapshot,"creation_enabled"));ui.set_resource_enabled(flag(&self.snapshot,"resource_enabled"));ui.set_motion_present(flag(&self.snapshot,"motion_conflict")||flag(&self.snapshot,"motion_handoff_available")||flag(&self.snapshot,"motion_handoff_requested"));ui.set_resource_pending(flag(&self.snapshot,"resource_enable_pending"));ui.set_camera_active(flag(&self.snapshot,"free_camera_active"));
+        let issue=flag(&self.snapshot,"faulted")||flag(&self.snapshot,"busy")||!flag(&self.snapshot,"runtime")||s(&self.snapshot,"prelive_catalog_status").contains("失败")||self.message.contains("未被接受")||self.message.contains("尚未完成")||self.catalog_scan;
         ui.set_connection_state(if !self.connected{0}else if issue{1}else{2});
         let catalog_failed=s(&self.snapshot,"prelive_catalog_status").contains("失败");ui.set_catalog_failed(self.connected&&catalog_failed);
         ui.set_connection_label(if !self.connected{self.connection_detail.clone().into()}else if catalog_failed{"已连接 · 目录异常".into()}else if issue{"已连接 · 等待就绪".into()}else{"游戏已连接".into()});
-        ui.set_can_scan_catalog(self.tx.is_some()&&flag(&self.snapshot,"runtime")&&!flag(&self.snapshot,"busy")&&!flag(&self.snapshot,"faulted")&&self.catalog_scan.is_none());
-        ui.set_status(if !self.connected{self.connection_detail.clone().into()}else if flag(&self.snapshot,"offline_catalog"){if flag(&self.snapshot,"offline_provisional"){"正在浏览本地图标；连接游戏后自动读取完整目录".into()}else{"正在浏览已缓存的人物目录；场景操作需进入拍摄或 Live".into()}}else{s(&self.snapshot,"status").into()});ui.set_notice(if self.message.is_empty(){["prelive_catalog_status","resource_catalog_notice","notice","resource_status","store_notice"].iter().map(|k|if *k=="prelive_catalog_status"{catalog_notice(s(&self.snapshot,k))}else{s(&self.snapshot,k).to_owned()}).filter(|x|!x.is_empty()).collect::<Vec<_>>().join(" · ").into()}else{self.message.clone().into()});
+        ui.set_can_scan_catalog(self.tx.is_some()&&self.game_configured&&!self.catalog_scan);
+        ui.set_status(if !self.connected{self.connection_detail.clone().into()}else if flag(&self.snapshot,"offline_catalog"){if flag(&self.snapshot,"offline_provisional"){"正在浏览游戏安装目录中的人物图标".into()}else{"正在浏览本地人物目录；场景操作需进入拍摄或 Live".into()}}else{s(&self.snapshot,"status").into()});ui.set_notice(if self.message.is_empty(){["prelive_catalog_status","resource_catalog_notice","notice","resource_status","store_notice"].iter().map(|k|if *k=="prelive_catalog_status"{catalog_notice(s(&self.snapshot,k))}else{s(&self.snapshot,k).to_owned()}).filter(|x|!x.is_empty()).collect::<Vec<_>>().join(" · ").into()}else{self.message.clone().into()});
         if let Some((wanted,since))=&self.save {if rows(&self.snapshot,"presets").iter().any(|v|["id","name","character","body","head","bodyAsset","faceAsset","hairAsset"].iter().all(|k|s(v,k)==s(wanted,k))){self.preset=s(wanted,"id").into();ui.set_page(0);self.message="预设已保存。".into();self.save=None;}else if since.elapsed()>Duration::from_secs(8){self.save=None;self.message="未确认保存成功，请检查存储状态后重试。".into();}}
         let chars=rows(&self.snapshot,"characters");if !chars.iter().any(|v|s(v,"id")==self.character){self.character=chars.first().map(|v|s(v,"id").to_owned()).unwrap_or_default();}
         let counts=people_catalog::counts(&self.snapshot);let query=ui.get_search().to_lowercase();let presets:Vec<_>=rows(&self.snapshot,"presets").into_iter().filter(|v|s(v,"character")==self.character).collect();
@@ -223,13 +265,59 @@ impl State {
                     if kind=="body"{ui.set_body_placeholder(placeholder.into());}else{ui.set_head_placeholder(placeholder.into());}
                 }
                 values.iter().all(|x|!x.is_empty())}else{
-                let b=bodies.iter().find(|v|s(v,"id")==self.body);let h=heads.iter().find(|v|s(v,"id")==self.head);let bk=image_key(&self.snapshot,&format!("part:body:{}",self.body),&json!({"action":"load_part_thumbnail","kind":"body","part_id":self.body}));let hk=image_key(&self.snapshot,&format!("part:head:{}",self.head),&json!({"action":"load_part_thumbnail","kind":"head","part_id":self.head}));pictures.body=self.cache.get(&bk).map(|p|p.body.clone()).unwrap_or_default();pictures.head=self.cache.get(&hk).map(|p|p.head.clone()).unwrap_or_default();ui.set_detail(format!("身体：{}\n\n头部：{}",b.map(|v|s(v,"name")).unwrap_or("尚未选择"),h.map(|v|s(v,"name")).unwrap_or("尚未选择")).into());b.is_some()&&h.is_some()};ui.set_save_ready(self.tx.is_some()&&flag(&self.snapshot,"writable")&&valid&&!flag(&self.snapshot,"offline_provisional")&&self.save.is_none());
+                let b=bodies.iter().find(|v|s(v,"id")==self.body);let h=heads.iter().find(|v|s(v,"id")==self.head);let bk=image_key(&self.snapshot,&format!("part:body:{}",self.body),&json!({"action":"load_part_thumbnail","kind":"body","part_id":self.body}));let hk=image_key(&self.snapshot,&format!("part:head:{}",self.head),&json!({"action":"load_part_thumbnail","kind":"head","part_id":self.head}));pictures.body=self.cache.get(&bk).map(|p|p.body.clone()).unwrap_or_default();pictures.head=self.cache.get(&hk).map(|p|p.head.clone()).unwrap_or_default();ui.set_detail(format!("身体：{}\n\n头部：{}",b.map(|v|s(v,"name")).unwrap_or("尚未选择"),h.map(|v|s(v,"name")).unwrap_or("尚未选择")).into());b.is_some()&&h.is_some()};ui.set_save_ready(self.tx.is_some()&&flag(&self.snapshot,"writable")&&valid&&self.save.is_none());
         }
         if (1..=3).contains(&page){let query=ui.get_resource_search().to_lowercase();
             ui.set_actors(model(actors.iter().filter(|v|s(v,"name").to_lowercase().contains(&query)).map(|v|Entry{key:key(v).into(),label:s(v,"name").into(),detail:if flag(v,"owned"){"本插件新增".into()}else{"场景原有人物".into()},selected:key(v)==self.actor,..Default::default()}).collect()));
             let resources=rows(&self.snapshot,"scene_resources");
-            if page!=1 {self.tree_rows=scene_tree::build(&resources,s(&self.snapshot,"active_scene_name"),page==3,&self.collapsed,&query,&self.notes);
-                ui.set_resources(model(self.tree_rows.iter().map(|r|Entry{key:r.key.clone().into(),label:s(&r.value,"name").into(),detail:[if flag(&r.value,"locked"){"受保护".to_owned()}else{"可控制".to_owned()},r.guess.map(|x|format!("推测：{x}")).unwrap_or_default(),if r.note.is_empty(){String::new()}else{format!("备注：{}",r.note)}].into_iter().filter(|v|!v.is_empty()).collect::<Vec<_>>().join(" · ").into(),selected:r.key==self.resource,depth:r.depth.min(8) as i32,expandable:r.has_children,expanded:r.expanded,hidden:flag(&r.value,"hidden"),locked:flag(&r.value,"locked"),..Default::default()}).collect()));
+            if page != 1 {
+                if ready && !self.asset_scan_on_open {
+                    self.send(json!({"action":"scan_resources"}));
+                    self.asset_scan_on_open = self.message.is_empty();
+                }
+                let resources = scene_tree::separated_resources(&resources);
+                let scene_name = s(&self.snapshot, "active_scene_name");
+                self.tree_rows.clear();
+                for moving in [false, true] {
+                    let filter = if moving { ui.get_moving_search() } else { ui.get_fixed_search() };
+                    let rows = scene_tree::build(&resources, scene_name, moving, &self.collapsed, &filter, &self.notes);
+                    let mut sections: [Vec<Entry>; 3] = Default::default();
+                    let mut section = 0;
+                    for row in &rows {
+                        let name = s(&row.value, "name");
+                        if !moving && row.depth == 0 {
+                            section = match scene_tree::category(&row.value) {
+                                "背景与装饰" => 1,
+                                "灯光与后处理" => 2,
+                                _ => 0,
+                            };
+                        }
+                        let tags = [Some(scene_tree::category(&row.value)), scene_tree::function_tag(name).or(row.guess),
+                            flag(&row.value, "contains_moving_asset").then_some("包含移动资产")]
+                            .into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                        sections[section].push(Entry {
+                            key: row.key.clone().into(), label: name.into(), tags: tags.into(),
+                            selected: row.key == self.resource, depth: row.depth.min(8) as i32,
+                            expandable: row.has_children, expanded: row.expanded, hidden: flag(&row.value, "hidden"),
+                            locked: flag(&row.value, "locked"), ..Default::default()
+                        });
+                    }
+                    let mut entries = Vec::new();
+                    for ((group, title), rows) in [
+                        ("fixed-structure", "舞台结构"), ("fixed-background", "背景与装饰"),
+                        ("fixed-lighting", "灯光与后处理")
+                    ].into_iter().zip(sections) {
+                        if rows.is_empty() { continue; }
+                        let expanded = moving || !filter.trim().is_empty() || !self.collapsed.contains(group);
+                        if !moving {
+                            entries.push(Entry { key: group.into(), label: title.into(), group_header: true,
+                                expandable: true, expanded, ..Default::default() });
+                        }
+                        if expanded { entries.extend(rows); }
+                    }
+                    if moving { ui.set_moving_assets(model(entries)); } else { ui.set_fixed_assets(model(entries)); }
+                    self.tree_rows.extend(rows);
+                }
                 ui.set_note_writable(!self.notes_error&&self.notes_path.is_some()&&self.tree_rows.iter().any(|r|r.key==self.resource&&r.note_key.is_some()));
             }
             if page==1 {if let Some(a)=self.actor_value(){ui.set_selection(s(&a,"name").into());ui.set_actor_owned(flag(&a,"owned"));ui.set_pose_supported(flag(&a,"pose_supported"));ui.set_detail(format!("身体：{}\n脸部：{}\n头发：{}",s(&a,"bodyAsset"),s(&a,"faceAsset"),s(&a,"hairAsset")).into());ui.set_can_hide(ready&&flag(&self.snapshot,"resource_enabled")&&resources.iter().any(|r|r["kind"]==0&&r["owner"]==a["instance"]&&!flag(r,"locked")));if self.pose_dirty {let p=&a["position"];let target=[ui.get_x_value().parse::<f32>().unwrap_or(0.0),ui.get_y_value().parse::<f32>().unwrap_or(0.0),ui.get_z_value().parse::<f32>().unwrap_or(0.0)];if (0..3).all(|i|p[i].as_f64().is_some_and(|v|(v-target[i] as f64).abs()<0.02)){self.pose_dirty=false;}}if !self.pose_dirty{self.position(ui,&a);}if let Some((id,rev))=self.reset_yaw {if self.snapshot["pose_reset_yaw_actor"].as_i64()==Some(id)&&self.snapshot["pose_reset_yaw_revision"].as_u64().unwrap_or(0)>rev {if let Some(y)=self.snapshot["pose_reset_yaw"].as_f64(){let y=signed_yaw(y);ui.set_yaw_pos(y as f32);ui.set_yaw_value(format!("{y:.1}").into());self.yaw_dirty=true;}self.reset_yaw=None;}}if let Some(y)=a["yaw"].as_f64(){if self.yaw_dirty&&signed_yaw(y-ui.get_yaw_pos() as f64).abs()<0.25{self.yaw_dirty=false;}if !self.yaw_dirty{let y=signed_yaw(y);ui.set_yaw_pos(y as f32);ui.set_yaw_value(format!("{y:.1}").into());}}if let Some((id,rev))=self.reset{if self.snapshot["pose_reset_actor"].as_i64()==Some(id)&&self.snapshot["pose_reset_revision"].as_u64().unwrap_or(0)>rev {self.position(ui,&a);self.pose_dirty=false;self.reset=None;}}}}
@@ -261,16 +349,23 @@ impl State {
     }
     fn act(&mut self,ui:&Manager,action:&str,arg:&str){
         self.message.clear();match action {
-            "nav"=>{ui.set_page(arg.parse().unwrap_or(0));self.pose_dirty=false;},
+            "nav"=>{let page=arg.parse().unwrap_or(0);let page=if page==3{2}else{page};if ui.get_page()!=page {self.asset_scan_on_open=false;}ui.set_page(page);self.pose_dirty=false;},
             "character"=>{self.character=arg.into();self.preset.clear();self.pages=[0;3];},"preset"=>self.preset=arg.into(),
             "preset-page"|"body-page"|"head-page"=>{let i=if action=="preset-page"{0}else if action=="body-page"{1}else{2};self.pages[i]=if arg=="-1"{self.pages[i].saturating_sub(1)}else{self.pages[i]+1};},
             "body"=>self.body=arg.into(),"head"=>self.head=arg.into(),"actor"=>{self.actor=arg.into();self.pose_dirty=false;self.yaw_dirty=false;ui.set_yaw_value("未读取".into());ui.set_yaw_pos(0.0);},"resource"=>{self.resource=arg.into();let note=self.tree_rows.iter().find(|r|r.key==self.resource).map(|r|r.note.clone()).unwrap_or_default();ui.set_resource_note(note.into());},
-            "tree-toggle"=>{if let Some(r)=self.tree_rows.iter().find(|r|r.key==arg){let k=r.collapse_key.clone();if !self.collapsed.remove(&k){self.collapsed.insert(k);}}},
+            "tree-toggle"=>{let group=matches!(arg,"fixed-structure"|"fixed-background"|"fixed-lighting");let collapse=if group{Some(arg.to_owned())}else{self.tree_rows.iter().find(|r|r.key==arg).map(|r|r.collapse_key.clone())};if let Some(k)=collapse{if !self.collapsed.remove(&k){self.collapsed.insert(k);}}},
             "save-note"=>{if !self.notes_error {if let (Some(path),Some(note_key),Some(tx))=(self.notes_path.clone(),self.tree_rows.iter().find(|r|r.key==self.resource).and_then(|r|r.note_key.clone()),self.tx.as_ref()){let note=ui.get_resource_note().trim().to_owned();if note.len()>1024||note.chars().any(char::is_control){self.message="备注过长或包含控制字符。".into();}else{let mut updated=self.notes.clone();if note.is_empty(){updated.remove(&note_key);}else{updated.insert(note_key,note);}if tx.try_send(Work::SaveNotes(path,updated.clone())).is_ok(){self.notes=updated;self.message="正在保存备注…".into();}else{self.message="操作队列忙，请稍后重试。".into();}}}}},
             "new"|"edit"=>{self.pages=[0;3];self.edit_id.clear();self.body.clear();self.head.clear();ui.set_preset_name("".into());ui.set_raw_mode(false);ui.set_cross(false);ui.set_body_index(-1);ui.set_face_index(-1);ui.set_hair_index(-1);self.raw_choices(ui);
                 if action=="edit" {if let Some(p)=rows(&self.snapshot,"presets").into_iter().find(|v|s(v,"id")==self.preset){if !flag(&p,"builtin"){self.edit_id=s(&p,"id").into();}ui.set_preset_name(s(&p,"name").into());self.body=s(&p,"body").into();self.head=s(&p,"head").into();if !s(&p,"bodyAsset").is_empty(){ui.set_raw_mode(true);for (i,k) in ["bodyAsset","faceAsset","hairAsset"].iter().enumerate(){let selected=self.raw[i].iter().position(|v|v==s(&p,k)).map(|v|v as i32).unwrap_or(-1);match i{0=>ui.set_body_index(selected),1=>ui.set_face_index(selected),_=>ui.set_hair_index(selected)}}}}}ui.set_page(4);},
-            "reconnect"=>{if let Some(tx)=&self.tx{if tx.try_send(Work::Reconnect).is_ok(){self.catalog_scan=None;self.message="正在重新连接游戏插件…".into();}else{self.message="操作队列忙，请稍后重试。".into();}}},
-            "scan"=>{if self.tx.is_some()&&flag(&self.snapshot,"runtime")&&!flag(&self.snapshot,"busy")&&!flag(&self.snapshot,"faulted"){let rev=self.snapshot["prelive_catalog_revision"].as_u64().unwrap_or(0);self.send(json!({"action":"read_pre_live_catalog"}));if self.message.is_empty(){self.catalog_scan=Some((rev,Instant::now()));self.message="正在读取人物和服装目录…".into();}}},"scan-scene"=>self.send(json!({"action":"scan"})),"scan-resources"=>self.send(json!({"action":"scan_resources"})),
+            "reconnect"=>{if let Some(tx)=&self.tx{if tx.try_send(Work::Reconnect).is_ok(){self.message="正在重新连接游戏插件…".into();}else{self.message="操作队列忙，请稍后重试。".into();}}},
+            "scan"=>{
+                if !self.catalog_scan {
+                    if self.tx.as_ref().is_some_and(|tx|tx.try_send(Work::ReadCatalog).is_ok()) {
+                        self.catalog_scan=true;
+                        self.message="正在读取本地人物和服装目录…".into();
+                    } else { self.message="操作队列忙，请稍后重试。".into(); }
+                }
+            },"scan-scene"=>self.send(json!({"action":"scan"})),"scan-resources"=>self.send(json!({"action":"scan_resources"})),
             "creation"=>self.send(json!({"action":"enable_creation","enabled":!flag(&self.snapshot,"creation_enabled")})),
             "resources"=>self.send(json!({"action":"enable_resources","enabled":!flag(&self.snapshot,"resource_enabled")})),
             "camera"=>self.send(json!({"action":"free_camera","enabled":!flag(&self.snapshot,"free_camera_active")})),
@@ -285,7 +380,7 @@ impl State {
             "move"=>{self.pose_dirty=true;if let Some(a)=self.actor_value(){let values=[ui.get_x_value(),ui.get_y_value(),ui.get_z_value()];let p:Option<Vec<f64>>=values.iter().map(|x|x.parse::<f64>().ok().filter(|n|n.is_finite()&&n.abs()<=10000.0)).collect();if let Some(p)=p{self.send(json!({"action":"move","instance":a["instance"],"position":p}));}}},
             "reset"=>{if let Some(a)=self.actor_value(){self.reset=Some((a["instance"].as_i64().unwrap_or(0),self.snapshot["pose_reset_revision"].as_u64().unwrap_or(0)));self.send(json!({"action":"reset_position","instance":a["instance"]}));}},
             "turn"|"yaw"=>{if let Some(a)=self.actor_value(){let value=if action=="yaw"{ui.get_yaw_value().to_string()}else{arg.into()};if let Ok(n)=value.parse::<f64>() {if n.is_finite()&&n.abs()<=360.0 {self.send(json!({"action":if action=="yaw"{"set_yaw"}else{"turn"},"instance":a["instance"],"degrees":n}));}else{self.message="请输入有效角度（0–360）。".into();}}}},
-            "hide-row-on"|"hide-row-off"=>{if let Some(r)=rows(&self.snapshot,"scene_resources").into_iter().find(|r|key(r)==arg){self.set_hidden(r,action=="hide-row-on");}return;},
+            "hide-row-on"|"hide-row-off"=>{if let Some(r)=self.tree_rows.iter().find(|r|r.key==arg).map(|r|r.value.clone()){self.set_hidden(r,action=="hide-row-on");}return;},
             "hide"=>{if let Some(r)=self.resource_value(){self.hide(r);}},
             "hide-actor"=>{if let Some(a)=self.actor_value(){if let Some(r)=rows(&self.snapshot,"scene_resources").into_iter().find(|r|r["kind"]==0&&r["owner"]==a["instance"]&&!flag(r,"locked")){self.hide(r);}}},
             "stage"=>self.send(json!({"action":"select_stage","choice":ui.get_stage_index()})),
@@ -307,7 +402,7 @@ impl State {
         let mut p=json!({"id":id,"name":name,"character":self.character,"body":"","head":"","factory":"","bodyAsset":"","faceAsset":"","hairAsset":""});
         if ui.get_raw_mode(){for (i,k) in ["bodyAsset","faceAsset","hairAsset"].iter().enumerate(){let index=[ui.get_body_index(),ui.get_face_index(),ui.get_hair_index()][i];let Some(value)=usize::try_from(index).ok().and_then(|x|self.raw[i].get(x))else{return;};p[*k]=value.clone().into();}}
         else{p["body"]=self.body.clone().into();p["head"]=self.head.clone().into();}
-        self.send(json!({"action":"save_preset","preset":p}));self.save=Some((p,Instant::now()));self.message="正在保存并等待游戏确认…".into();
+        self.send(json!({"action":"save_preset","preset":p}));self.save=Some((p,Instant::now()));self.message="正在保存预设…".into();
     }
 }
 
@@ -317,6 +412,7 @@ fn run()->Result<(),Box<dyn std::error::Error>>{
     slint::BackendSelector::new().backend_name("winit".into()).renderer_name("software".into()).select()?;
     music_window::platform::configure_font_fallback();
     let ui=Manager::new()?;
+    ui.set_desktop_version(env!("CARGO_PKG_VERSION").into());
     // Check the offline resource library in a separate process; network failure
     // and exporter work must never block the desktop or the game pipe.
     std::thread::spawn(|| {
@@ -329,7 +425,7 @@ fn run()->Result<(),Box<dyn std::error::Error>>{
     let client=legacy::pipe::Client::from_args().ok();std::thread::spawn(move||worker(client,rx,events_tx));
     let notes_path=legacy::music::game_root().ok().map(|p|p.join("GakuLoader/Configs/gakuactors/scene-notes.json"));
     let (notes,notes_error)=match notes_path.as_ref().map(|p|scene_tree::load_notes(p)){Some(Ok(v))=>(v,false),Some(Err(_))=>(BTreeMap::new(),true),None=>(BTreeMap::new(),true)};
-    let state=Rc::new(RefCell::new(State{snapshot:json!({"status":"等待游戏和 GakuActors 插件"}),tx:Some(tx),connected:false,connection_detail:"正在检测游戏".into(),character:String::new(),preset:String::new(),actor:String::new(),resource:String::new(),body:String::new(),head:String::new(),edit_id:String::new(),raw:Default::default(),cache:HashMap::new(),lru:VecDeque::new(),requested:HashSet::new(),tree_rows:Vec::new(),collapsed:HashSet::new(),notes,notes_path,notes_error,yaw_dirty:false,pages:[0;3],catalog_scan:None,reference:0,stage_initialized:false,confirm:None,undo:None,save:None,message:String::new(),pose_dirty:false,reset:None,reset_yaw:None}));
+    let state=Rc::new(RefCell::new(State{snapshot:json!({"status":"等待游戏和 GakuActors 插件"}),tx:Some(tx),connected:false,connection_detail:"正在检测游戏".into(),character:String::new(),preset:String::new(),actor:String::new(),resource:String::new(),body:String::new(),head:String::new(),edit_id:String::new(),raw:Default::default(),cache:HashMap::new(),lru:VecDeque::new(),requested:HashSet::new(),tree_rows:Vec::new(),asset_scan_on_open:false,collapsed:HashSet::new(),notes,notes_path:notes_path.clone(),notes_error,yaw_dirty:false,pages:[0;3],catalog_scan:false,game_configured:notes_path.is_some(),reference:0,stage_initialized:false,confirm:None,undo:None,save:None,message:String::new(),pose_dirty:false,reset:None,reset_yaw:None}));
     let library=Rc::new(RefCell::new(resource_library::Library::new()));
     let weak=ui.as_weak();let lib=library.clone();ui.on_library_action(move|action,arg|{if let Some(ui)=weak.upgrade(){lib.borrow_mut().action(&ui,&action,&arg);}});
     let weak=ui.as_weak();let st=state.clone();ui.on_action(move|a,b|{if let Some(ui)=weak.upgrade(){st.borrow_mut().act(&ui,&a,&b);}});
@@ -338,7 +434,7 @@ fn run()->Result<(),Box<dyn std::error::Error>>{
     ui.show()?;
     let mut startup_size_ready=apply_initial_window_size(ui.window());
     {let weak=ui.as_weak();let state=state.clone();ui.on_drag_position(move |axis,delta|{let Some(ui)=weak.upgrade()else{return;};if !delta.is_finite()||delta==0.0{return;}let mut st=state.borrow_mut();if axis.as_str()=="朝向" {let value=signed_yaw(ui.get_yaw_pos() as f64+delta as f64*0.1);ui.set_yaw_pos(value as f32);ui.set_yaw_value(format!("{value:.1}").into());st.yaw_dirty=true;if let Some(a)=st.actor_value(){st.send(json!({"action":"set_yaw","instance":a["instance"],"degrees":value.rem_euclid(360.0)}));}return;}let mut values=[ui.get_x_value().parse::<f64>().unwrap_or(0.0),ui.get_y_value().parse::<f64>().unwrap_or(0.0),ui.get_z_value().parse::<f64>().unwrap_or(0.0)];let i=match axis.as_str(){"X"=>0,"Y"=>1,"Z"=>2,_=>return};let current=match i{0=>ui.get_x_pos(),1=>ui.get_y_pos(),_=>ui.get_z_pos()};values[i]=(current as f64+delta as f64*0.01).clamp(-10000.0,10000.0);match i{0=>{ui.set_x_pos(values[i] as f32);ui.set_x_value(format!("{:.2}",values[i]).into());},1=>{ui.set_y_pos(values[i] as f32);ui.set_y_value(format!("{:.2}",values[i]).into());},_=>{ui.set_z_pos(values[i] as f32);ui.set_z_value(format!("{:.2}",values[i]).into());}};st.pose_dirty=true;if let Some(a)=st.actor_value(){st.send(json!({"action":"move","instance":a["instance"],"position":values}));}});}
-    let timer=slint::Timer::default();let weak=ui.as_weak();let lib=library.clone();let mut title_bar_ready=false;timer.start(slint::TimerMode::Repeated,Duration::from_millis(160),move||{let Some(ui)=weak.upgrade()else{return;};lib.borrow_mut().poll(&ui);if !startup_size_ready{startup_size_ready=apply_initial_window_size(ui.window());}if !title_bar_ready{title_bar_ready=music_window::platform::sync_title_bar(ui.window(),0);}let mut st=state.borrow_mut();let mut dirty=false;for e in events_rx.try_iter().take(16){dirty=true;match e {Event::IconsUpdated=>{let empty:Vec<_>=st.cache.iter().filter(|(k,p)|if k.starts_with("part:body:"){p.body.size().width==0}else if k.starts_with("part:head:"){p.head.size().width==0}else{p.body.size().width==0||p.head.size().width==0}).map(|(k,_)|k.clone()).collect();for k in empty{st.cache.remove(&k);st.lru.retain(|x|x!=&k);}},Event::Snapshot(v)=>{if flag(&v,"runtime")&&st.message=="游戏连接已断开，正在等待重新连接。"{st.message.clear();}st.snapshot=v;},Event::Picture(k,a,b)=>st.picture(k,a,b),Event::NotesSaved(result)=>{st.message=match result{Ok(())=>"备注已保存。".into(),Err(e)=>format!("备注保存失败：{e}")};},Event::ScanRejected=>{st.catalog_scan=None;st.message="读取目录请求未被接受，请稍后重试。".into();},Event::Probe(notice)=>{if st.message=="游戏连接已断开，正在等待重新连接。"||st.message.ends_with("；窗口会继续自动检测。") {st.message=format!("{notice}；窗口会继续自动检测。");}st.connection_detail=notice;},Event::RetryFailed(notice)=>{st.connection_detail=notice.clone();st.message=format!("{notice}；窗口会继续自动检测。");},Event::Connected=>{st.connected=true;st.connection_detail.clear();st.message.clear();},Event::Disconnected=>{st.connected=false;st.connection_detail="正在检测游戏".into();st.catalog_scan=None;st.requested.clear();st.snapshot=json!({"status":"游戏连接已断开，等待重新连接","runtime":false});st.message="游戏连接已断开，正在等待重新连接。".into();}}}if dirty||st.save.is_some()||st.catalog_scan.is_some(){st.render(&ui);}});
+    let timer=slint::Timer::default();let weak=ui.as_weak();let lib=library.clone();let mut title_bar_ready=false;timer.start(slint::TimerMode::Repeated,Duration::from_millis(160),move||{let Some(ui)=weak.upgrade()else{return;};lib.borrow_mut().poll(&ui);if !startup_size_ready{startup_size_ready=apply_initial_window_size(ui.window());}if !title_bar_ready{title_bar_ready=music_window::platform::sync_title_bar(ui.window(),0);}let mut st=state.borrow_mut();let mut dirty=false;for e in events_rx.try_iter().take(16){dirty=true;match e {Event::IconsUpdated=>{let empty:Vec<_>=st.cache.iter().filter(|(k,p)|if k.starts_with("part:body:"){p.body.size().width==0}else if k.starts_with("part:head:"){p.head.size().width==0}else{p.body.size().width==0||p.head.size().width==0}).map(|(k,_)|k.clone()).collect();for k in empty{st.cache.remove(&k);st.lru.retain(|x|x!=&k);}},Event::Snapshot(v)=>{if flag(&v,"runtime")&&st.message=="游戏连接已断开，正在等待重新连接。"{st.message.clear();}st.snapshot=v;},Event::Picture(k,a,b)=>st.picture(k,a,b),Event::NotesSaved(result)=>{st.message=match result{Ok(())=>"备注已保存。".into(),Err(e)=>format!("备注保存失败：{e}")};},Event::CatalogRead(result)=>{st.catalog_scan=false;st.message=result.unwrap_or_else(|e|format!("读取本地人物目录失败：{e}"));},Event::PresetWriteFailed(error)=>{st.save=None;st.message=error;},Event::Probe(notice)=>{if st.message=="游戏连接已断开，正在等待重新连接。"||st.message.ends_with("；窗口会继续自动检测。") {st.message=format!("{notice}；窗口会继续自动检测。");}st.connection_detail=notice;},Event::RetryFailed(notice)=>{st.connection_detail=notice.clone();st.message=format!("{notice}；窗口会继续自动检测。");},Event::Connected=>{st.connected=true;st.connection_detail.clear();st.message.clear();},Event::Disconnected=>{st.connected=false;st.connection_detail="正在检测游戏".into();st.requested.clear();st.snapshot=json!({"status":"游戏连接已断开，等待重新连接","runtime":false});st.message="游戏连接已断开，正在等待重新连接。".into();}}}if dirty||st.save.is_some()||st.catalog_scan{st.render(&ui);}});
     music_window::platform::sync_title_bar(ui.window(),0);
     ui.run()?;Ok(())
 }
