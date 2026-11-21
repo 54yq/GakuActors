@@ -5,11 +5,10 @@
 #include <utility>
 #include <vector>
 namespace GakuActors {
-inline bool MayReadDesktopCatalog(bool admitted,bool preLiveDetected) { return admitted||preLiveDetected; }
 inline bool ShouldObservePreLive(bool admitted,uint64_t uiSeen,uint64_t now) {
     return !admitted&&uiSeen&&now>=uiSeen&&now-uiSeen<=3000;
 }
-enum class Action { Scan, Reload, Save, DeletePreset, Spawn, Remove, Move, ResetPosition, Turn, SetYaw, ResetYaw, SetLivePause, SetVisualHandoff, EnableCreation, ScanResources, HideResource, EnableResourceControls, CameraColor, SelectStage, LoadThumbnail, ApplyActorModel, RestoreActorModel, FreeCamera, InspectPreLive, ReadPreLiveCharacters, ReadDesktopCatalog, ArmPreLive, CancelPreLive };
+enum class Action { Scan, ScanScene, Reload, Save, DeletePreset, Spawn, Remove, Move, ResetPosition, Turn, SetYaw, ResetYaw, SetLivePause, SetVisualHandoff, EnableCreation, ScanResources, HideResource, EnableResourceControls, CameraColor, SelectStage, LoadThumbnail, ApplyActorModel, RestoreActorModel, FreeCamera, InspectPreLive, ReadPreLiveCharacters, ReadDesktopCatalog, ArmPreLive, CancelPreLive };
 struct Command { Action action; Preset preset; int instance{}; float position[3]{}; float degrees{}; SceneResource resource{}; bool hidden{}; float color[4]{}; int actorScene{};std::string actorUnique; };
 struct LiveModelObservation {int instance{};std::string name,body,face,hair,status;bool operator==(const LiveModelObservation&)const=default;};
 struct UiSnapshot {

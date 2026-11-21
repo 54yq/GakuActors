@@ -25,9 +25,9 @@ extern "system" { fn DwmSetWindowAttribute(hwnd:*mut std::ffi::c_void, attribute
 
 fn apply_title_colors(hwnd: *mut std::ffi::c_void, mode: i32) -> [i32;4] {
     let dark = u32::from(mode == 2);
-    let caption = colorref(match mode { 1 => 0xfdf1f0, 2 => 0x172131, _ => 0xedf4fd });
-    let text = colorref(if mode == 2 { 0xe1e8f4 } else { 0x263449 });
-    let border = colorref(match mode { 1 => 0xeee0de, 2 => 0x354257, _ => 0xdfe7f1 });
+    let caption = colorref(match mode { 1 => 0xfdf1f0, 2 => 0x171a24, _ => 0xedf4fd });
+    let text = colorref(if mode == 2 { 0xeff1f7 } else { 0x263449 });
+    let border = colorref(match mode { 1 => 0xeee0de, 2 => 0x2b3243, _ => 0xdfe7f1 });
     // https://learn.microsoft.com/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute
     // Windows 11 supports explicit caption colors. Older Windows keeps native
     // decorations and still receives the light/dark preference where supported.

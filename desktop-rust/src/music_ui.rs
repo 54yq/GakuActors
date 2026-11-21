@@ -1,38 +1,23 @@
 slint::slint! {
 #[edition = "1.19"]
-import { ComboBox, LineEdit, ListView, ScrollView, Slider, CheckBox, Palette } from "std-widgets.slint";
+import { ComboBox, LineEdit, ListView, ScrollView, Slider, Palette } from "std-widgets.slint";
+import { ActorsTheme, Panel, Divider, PageTitle, SelectionMark, NightCheck } from "night_theme.slint";
 export struct GroupRow { key:string, label:string, count:int, selected:bool }
 export struct SongRow { name:string, title:string, subtitle:string, variant:string, cached:string, compiled:string, selected:bool, checked:bool }
-export global MusicTheme {
-    in-out property <int> mode:0;
-    out property <bool> dark:mode == 2;
-    out property <color> accent:mode == 1 ? #bf4949 : dark ? rgb(126,175,245) : #3977c9;
-    out property <color> text:dark ? #e1e8f4 : #263449;
-    out property <color> muted:dark ? #a3b1c5 : #748196;
-    out property <color> line:dark ? #354257 : mode == 1 ? #eee0de : #dfe7f1;
-    out property <color> paper:dark ? #182233 : #fbfdff;
-    out property <color> panel:dark ? #1c2739 : #ffffff;
-    out property <color> header:dark ? #172131 : mode == 1 ? #fdf1f0 : #edf4fd;
-    out property <color> aside:dark ? #182436 : mode == 1 ? #fff8f7 : #f6f9fe;
-    out property <color> soft:dark ? #2b4261 : mode == 1 ? #fff0ee : #edf5ff;
-    out property <color> selection:dark ? #2b4261 : mode == 1 ? #fbe3e0 : #dfecff;
-    out property <color> success:dark ? #9ac8b0 : #477660;
-    out property <color> on-accent:dark ? #152339 : #ffffff;
-}
-component Panel inherits Rectangle { background:MusicTheme.panel; border-color:MusicTheme.line; border-width:1px; border-radius:8px; }
-component Title inherits Text { color:MusicTheme.text; font-size:13px; font-weight:600; min-width:0px; overflow:elide; }
-component Note inherits Text { color:MusicTheme.muted; font-size:11px; min-width:0px; overflow:elide; }
+component Title inherits Text { color:ActorsTheme.text; font-size:13px; font-weight:600; min-width:0px; overflow:elide; }
+component Note inherits Text { color:ActorsTheme.muted; font-size:11px; min-width:0px; overflow:elide; }
 component Action inherits Rectangle {
     in property <string> text; in property <image> icon; in property <bool> enabled:true; in property <bool> primary:false; in property <bool> chosen:false; in property <bool> selection-tab:false;
     property <bool> filled:root.primary || (root.selection-tab && root.chosen);
     callback clicked(); height:34px; min-width:64px; horizontal-stretch:0;
-    background:root.filled && root.enabled ? MusicTheme.accent : root.chosen ? MusicTheme.selection : touch.has-hover || root.primary ? MusicTheme.soft : MusicTheme.panel;
-    border-radius:6px; border-width:root.chosen ? 2px : 1px; border-color:root.primary || root.chosen ? MusicTheme.accent : MusicTheme.line;
+    background:root.filled && root.enabled ? ActorsTheme.accent : root.chosen ? ActorsTheme.selection : touch.has-hover || root.primary ? ActorsTheme.soft : ActorsTheme.control;
+    border-radius:6px; border-width:root.chosen ? 2px : 1px; border-color:root.enabled && (root.primary || root.chosen) ? ActorsTheme.accent : ActorsTheme.control-line;
     accessible-role:button; accessible-label:root.text; accessible-enabled:root.enabled;
     HorizontalLayout {padding-left:8px;padding-right:8px;spacing:5px;alignment:center;
-        if root.icon.width > 0: Rectangle {width:15px;background:transparent;Image {x:0px;y:(parent.height - 15px)/2;source:root.icon;width:15px;height:15px;colorize:!root.enabled ? MusicTheme.muted : root.filled ? MusicTheme.on-accent : MusicTheme.text;}}
-        Text {text:root.text;font-size:12px;font-weight:root.chosen ? 600 : 400;color:!root.enabled ? MusicTheme.muted.with-alpha(0.55) : root.filled ? MusicTheme.on-accent : root.chosen ? MusicTheme.accent : MusicTheme.text;vertical-alignment:center;}
+        if root.icon.width > 0: Rectangle {width:15px;background:transparent;Image {x:0px;y:(parent.height - 15px)/2;source:root.icon;width:15px;height:15px;colorize:!root.enabled ? ActorsTheme.muted : root.filled ? ActorsTheme.on-accent : ActorsTheme.text;}}
+        Text {text:root.text;font-size:12px;font-weight:root.chosen ? 600 : 400;color:!root.enabled ? ActorsTheme.muted.with-alpha(0.55) : root.filled ? ActorsTheme.on-accent : root.chosen ? ActorsTheme.accent : ActorsTheme.text;vertical-alignment:center;}
     }
+    if focus.has-focus: Rectangle { x:2px; y:2px; width:parent.width - 4px; height:parent.height - 4px; border-width:1px; border-radius:5px; border-color:ActorsTheme.accent; }
     focus := FocusScope {enabled:root.enabled; key-pressed(event)=>{if event.text == "\n" || event.text == " " {root.clicked();return accept;}return reject;}
         touch := TouchArea {enabled:root.enabled;clicked=>{focus.focus();root.clicked();}}
     }
@@ -41,20 +26,18 @@ component Range inherits Rectangle {
     in-out property <float> value:0; in property <float> maximum:100; in property <bool> enabled:true; callback changed(float); callback released();
     min-width:60px; height:24px; horizontal-stretch:1;
     property <float> portion:Math.clamp(root.value / Math.max(1,root.maximum),0,1);
-    Rectangle {x:10px;y:(parent.height - 4px)/2;width:parent.width - 20px;height:4px;border-radius:2px;background:MusicTheme.line;}
-    Rectangle {x:10px;y:(parent.height - 4px)/2;width:(parent.width - 20px)*root.portion;height:4px;border-radius:2px;background:root.enabled ? MusicTheme.accent : MusicTheme.muted;}
-    Rectangle {x:2px+(parent.width - 20px)*root.portion;y:(parent.height - 16px)/2;width:16px;height:16px;border-radius:8px;background:root.enabled ? MusicTheme.accent : MusicTheme.muted; border-width:native.has-focus ? 2px : 0px;border-color:MusicTheme.text;}
+    Rectangle {x:10px;y:(parent.height - 4px)/2;width:parent.width - 20px;height:4px;border-radius:2px;background:ActorsTheme.line;}
+    Rectangle {x:10px;y:(parent.height - 4px)/2;width:(parent.width - 20px)*root.portion;height:4px;border-radius:2px;background:root.enabled ? ActorsTheme.accent : ActorsTheme.muted;}
+    Rectangle {x:2px+(parent.width - 20px)*root.portion;y:(parent.height - 16px)/2;width:16px;height:16px;border-radius:8px;background:root.enabled ? ActorsTheme.accent : ActorsTheme.muted; border-width:native.has-focus ? 2px : 0px;border-color:ActorsTheme.text;}
     native := Slider {x:0px;y:0px;width:parent.width;height:parent.height;opacity:0.001;minimum:0;maximum:root.maximum;value <=> root.value;enabled:root.enabled;changed=>{root.changed(self.value);}released=>{root.released();}}
 }
 export component MusicWindow inherits Window {
     icon: @image-url("../../assets/music-library-window.png");
     title:"GakuActors · 乐库"; preferred-width:1280px; preferred-height:800px; min-width:1040px; min-height:660px;
-    default-font-family:"Microsoft YaHei UI"; default-font-size:13px;background:MusicTheme.paper;
+    default-font-family:"Microsoft YaHei UI"; default-font-size:13px;background:ActorsTheme.paper;
     in property <[SongRow]> songs; in property <[GroupRow]> groups; in property <[string]> artist-options; in property <[string]> title-options;
     in-out property <string> search; in-out property <int> artist-index:0; in-out property <int> title-index:0; in-out property <int> kind-index:0; in-out property <int> status-index:0;
-    in-out property <int> theme-index <=> MusicTheme.mode;
-    changed theme-index=>{Palette.color-scheme=root.theme-index == 2 ? ColorScheme.dark : ColorScheme.light;}
-    init=>{Palette.color-scheme=root.theme-index == 2 ? ColorScheme.dark : ColorScheme.light;}
+    init=>{Palette.color-scheme=ColorScheme.dark;}
     in property <int> group-mode:0; in property <string> result-label; in property <string> scope-title:"全部歌曲";
     in property <string> detail-title:"选择一首歌曲";in property <string> detail-subtitle;in property <string> resource;
     in property <string> cache-label;in property <string> compile-label;in property <string> notice;
@@ -80,15 +63,15 @@ export component MusicWindow inherits Window {
     callback pointer-down(length,length);
     pointer-down(x,y)=>{if search-box.has-focus && (x < search-box.x || x >= search-box.x + search-box.width || y < search-box.y || y >= search-box.y + search-box.height) {root.dismiss-search();}}
     callback action(string,string);callback search-changed();callback seek(float);callback volume-changed(float);callback volume-save();
-    header := Rectangle {x:0px;y:0px;width:root.width;height:68px;background:MusicTheme.header;
-        Rectangle {x:0px;y:parent.height - 1px;width:parent.width;height:1px;background:MusicTheme.line;}
-        Text {x:18px;y:20px;text:"乐库";color:MusicTheme.text;font-size:20px;font-weight:600;}
+    header := Rectangle {x:0px;y:0px;width:root.width;height:ActorsTheme.header-height;background:ActorsTheme.header;
+        Divider { x:0px; y:parent.height - 1px; width:parent.width; }
+        Image { x:22px; y:(parent.height - 28px)/2; width:28px; height:28px; source:@image-url("../../assets/music-library-window.png"); image-fit:contain; }
+        Text { x:62px; y:0px; height:parent.height; text:"GakuActors · 乐库"; color:ActorsTheme.text; font-size:19px; font-weight:650; vertical-alignment:center; }
         search-box := LineEdit {x:(parent.width - self.width)/2;y:17px;width:300px;height:34px;text <=> root.search;placeholder-text:"搜索歌名、演唱者或资源名";edited=>{root.search-changed();}accepted=>{root.dismiss-search();}key-pressed(event)=>{if event.text == Key.Escape {root.dismiss-search();return accept;}return reject;}changed has-focus=>{if !self.has-focus {self.clear-selection();}}}
-        ComboBox {x:parent.width - 222px;y:17px;width:116px;height:34px;model:["蓝色主题","红色主题","黑夜模式"];current-index <=> root.theme-index;selected=>{root.action("theme","");}}
         Action {x:parent.width - 94px;y:17px;width:78px;text:"刷新";enabled:!root.busy;clicked=>{root.action("scan","");}}
     }
-    body := HorizontalLayout {x:12px;y:80px;width:root.width - 24px;height:root.height - 204px;spacing:10px;
-        left-card := Panel {width:176px;background:MusicTheme.header;
+    body := HorizontalLayout {x:12px;y:80px;width:root.width - 24px;height:root.height - 204px;spacing:ActorsTheme.workspace-gap;
+        left-card := Panel {width:ActorsTheme.sidebar-width;background:ActorsTheme.aside;
             VerticalLayout {padding:12px;spacing:10px;
                 Title {text:"资料库";}
                 Action {text:"全部歌曲";clicked=>{root.action("reset","");}}
@@ -99,23 +82,21 @@ export component MusicWindow inherits Window {
                 Note {text:root.group-mode == 0 ? "演唱者目录" : "歌曲目录";}
                 group-list := ListView {vertical-stretch:1;horizontal-scrollbar-policy:always-off;
                     for group in root.groups: Rectangle {width:group-list.visible-width;height:36px;
-                        Rectangle {x:0px;y:2px;width:parent.width - 18px;height:32px;border-radius:5px;background:group.selected ? MusicTheme.selection : group-touch.has-hover ? MusicTheme.soft : transparent;border-width:group.selected ? 1px : 0px;border-color:MusicTheme.accent;
-                            if group.selected: Rectangle {x:0px;y:7px;width:3px;height:18px;border-radius:1.5px;background:MusicTheme.accent;}
+                        Rectangle {x:0px;y:2px;width:parent.width - 18px;height:32px;border-radius:5px;background:group.selected ? ActorsTheme.selection : group-touch.has-hover ? ActorsTheme.soft : transparent;border-width:group.selected ? 1px : 0px;border-color:ActorsTheme.accent;
+                            if group.selected: SelectionMark { height:parent.height; }
                             HorizontalLayout {padding-left:10px;padding-right:7px;spacing:4px;
-                                Text {text:group.label;min-width:0px;horizontal-stretch:1;overflow:elide;vertical-alignment:center;font-size:12px;font-weight:group.selected ? 600 : 400;color:group.selected ? MusicTheme.accent : MusicTheme.text;}
-                                Note {text:group.count;width:25px;horizontal-alignment:right;vertical-alignment:center;color:group.selected ? MusicTheme.accent : MusicTheme.muted;}
+                                Text {text:group.label;min-width:0px;horizontal-stretch:1;overflow:elide;vertical-alignment:center;font-size:12px;font-weight:group.selected ? 600 : 400;color:group.selected ? ActorsTheme.accent : ActorsTheme.text;}
+                                Note {text:group.count;width:25px;horizontal-alignment:right;vertical-alignment:center;color:group.selected ? ActorsTheme.accent : ActorsTheme.muted;}
                             }
                             group-touch := TouchArea {clicked=>{root.action("group",group.key);}}
                         }
                     }
                 }
-                Note {text:"学园偶像大师 · 本地资源";}
             }
         }
         list-card := Panel {horizontal-stretch:1;min-width:420px;
             VerticalLayout {padding:14px;spacing:10px;
-                Note {text:"我的乐库";}
-                Text {text:root.scope-title;min-width:0px;overflow:elide;font-size:22px;font-weight:600;color:MusicTheme.text;}
+                PageTitle { text:root.scope-title; }
                 Note {text:root.result-label;}
                 HorizontalLayout {height:34px;spacing:7px;
                     Action {width:84px;text:root.multi-mode ? "退出多选" : "多选";enabled:!root.busy;chosen:root.multi-mode;clicked=>{root.action("multi-toggle","");}}
@@ -123,7 +104,7 @@ export component MusicWindow inherits Window {
                     if root.filter-active: Action {width:84px;text:"取消筛选";clicked=>{root.action("clear-filter","");}}
                     Rectangle {horizontal-stretch:1;background:transparent;}
                 }
-                if root.filter-open: Rectangle {height:66px;background:MusicTheme.aside;border-radius:6px;border-width:1px;border-color:MusicTheme.line;
+                if root.filter-open: Rectangle {height:66px;background:ActorsTheme.aside;border-radius:6px;border-width:1px;border-color:ActorsTheme.line;
                     HorizontalLayout {padding:8px;spacing:8px;
                         VerticalLayout {spacing:3px;Note {text:"歌曲";}ComboBox {min-width:0px;model:root.title-options;current-index <=> root.title-index;selected=>{root.action("filter","");}}}
                         VerticalLayout {spacing:3px;Note {text:"版本";}ComboBox {model:["全部版本","通用","Live"];current-index <=> root.kind-index;selected=>{root.action("filter","");}}}
@@ -131,7 +112,7 @@ export component MusicWindow inherits Window {
                     }
                 }
                 HorizontalLayout {height:24px;padding-right:18px;spacing:7px;
-                    if root.multi-mode: CheckBox {width:24px;checked:root.visible-count > 0 && root.visible-checked == root.visible-count;enabled:!root.busy && root.visible-count > 0;toggled=>{root.action("check-visible",self.checked ? "1" : "0");}}
+                    if root.multi-mode: NightCheck {cross-axis-self-alignment:center;width:24px;checked:root.visible-count > 0 && root.visible-checked == root.visible-count;enabled:!root.busy && root.visible-count > 0;toggled=>{root.action("check-visible",self.checked ? "1" : "0");}}
                     Note {text:"歌曲 / 演唱者";horizontal-stretch:1;}
                     Note {text:"版本";width:80px;}
                     Note {text:"缓存";width:52px;horizontal-alignment:center;}
@@ -139,35 +120,35 @@ export component MusicWindow inherits Window {
                 }
                 versions := ListView {vertical-stretch:1;min-height:0px;horizontal-scrollbar-policy:always-off;
                     for row in root.songs: Rectangle {height:54px;width:versions.visible-width;
-                        Rectangle {x:0px;y:2px;width:parent.width - 18px;height:parent.height - 4px;clip:true;border-radius:5px;background:row.selected ? MusicTheme.selection : row.checked ? MusicTheme.soft : MusicTheme.panel;border-width:row.selected ? 1px : 0px;border-color:MusicTheme.accent;
-                            if row.selected: Rectangle {x:0px;y:10px;width:3px;height:parent.height - 20px;border-radius:1.5px;background:MusicTheme.accent;}
+                        Rectangle {x:0px;y:2px;width:parent.width - 18px;height:parent.height - 4px;clip:true;border-radius:5px;background:row.selected ? ActorsTheme.selection : row.checked ? ActorsTheme.soft : ActorsTheme.panel;border-width:row.selected ? 1px : 0px;border-color:ActorsTheme.accent;
+                            if row.selected: SelectionMark { height:parent.height; }
                             TouchArea {clicked=>{root.action("select",row.name);}}
                             HorizontalLayout {padding-left:10px;padding-right:7px;spacing:7px;
-                                if root.multi-mode: CheckBox {width:24px;checked:row.checked;enabled:!root.busy;toggled=>{root.action("check",row.name);}}
+                                if root.multi-mode: NightCheck {cross-axis-self-alignment:center;width:24px;checked:row.checked;enabled:!root.busy;toggled=>{root.action("check",row.name);}}
                                 Rectangle {horizontal-stretch:1;min-width:0px;background:transparent;
                                     VerticalLayout {spacing:2px;alignment:center;
-                                        Title {text:row.title; color:row.selected ? MusicTheme.accent : MusicTheme.text;}
+                                        Title {text:row.title; color:row.selected ? ActorsTheme.accent : ActorsTheme.text;}
                                         Note {text:row.subtitle;}
                                     }
                                     TouchArea {clicked=>{root.action("select",row.name);}}
                                 }
                                 Note {text:row.variant;width:80px;vertical-alignment:center;}
-                                Note {text:row.cached;width:52px;horizontal-alignment:center;vertical-alignment:center;color:row.cached == "已缓存" ? MusicTheme.success : MusicTheme.muted;}
-                                Note {text:row.compiled;width:52px;horizontal-alignment:center;vertical-alignment:center;color:row.compiled == "已编译" ? MusicTheme.success : MusicTheme.muted;}
+                                Note {text:row.cached;width:52px;horizontal-alignment:center;vertical-alignment:center;color:row.cached == "已缓存" ? ActorsTheme.success : ActorsTheme.muted;}
+                                Note {text:row.compiled;width:52px;horizontal-alignment:center;vertical-alignment:center;color:row.compiled == "已编译" ? ActorsTheme.success : ActorsTheme.muted;}
                             }
-                            if !row.selected: Rectangle {x:0px;y:parent.height - 1px;width:parent.width;height:1px;background:MusicTheme.line;}
+                            if !row.selected: Rectangle {x:0px;y:parent.height - 1px;width:parent.width;height:1px;background:ActorsTheme.line;}
                         }
                     }
                 }
             }
         }
         right-column := Rectangle {width:244px;background:transparent;
-            right-card := Panel {x:0px;y:0px;width:parent.width;height:Math.min(parent.height,root.multi-mode ? 390px : 490px);background:MusicTheme.aside;
+            right-card := Panel {x:0px;y:0px;width:parent.width;height:Math.min(parent.height,root.multi-mode ? 390px : root.has-song ? 490px : 94px);
                 ScrollView {x:11px;y:14px;width:parent.width - 22px;height:parent.height - 28px;horizontal-scrollbar-policy:always-off;
                     VerticalLayout {padding-right:16px;spacing:11px;alignment:start;
                         Note {text:root.multi-mode ? "多选资源 · 批量操作" : "所选版本 · 资源操作";}
                         if root.multi-mode: VerticalLayout {spacing:10px;
-                            Text {text:"已勾选 " + root.checked-count + " 项";color:MusicTheme.text;font-size:19px;font-weight:600;}
+                            Text {text:"已勾选 " + root.checked-count + " 项";color:ActorsTheme.text;font-size:19px;font-weight:600;}
                             Note {text:"当前列表 " + root.visible-count + " 项，其中已勾选 " + root.visible-checked + " 项。";wrap:word-wrap;}
                             Action {text:"取消多选";enabled:!root.busy;clicked=>{root.action("clear-checks","");}}
                             Note {text:root.bulk-summary;wrap:word-wrap;}
@@ -179,27 +160,27 @@ export component MusicWindow inherits Window {
                         }
                         if !root.multi-mode && !root.has-song: Note {text:"选择歌曲以查看资源。";wrap:word-wrap;}
                         if !root.multi-mode && root.has-song: VerticalLayout {spacing:10px;
-                            Text {text:root.detail-title;color:MusicTheme.text;font-size:20px;font-weight:600;wrap:word-wrap;}
+                            Text {text:root.detail-title;color:ActorsTheme.text;font-size:20px;font-weight:600;wrap:word-wrap;}
                             Note {text:root.detail-subtitle;wrap:word-wrap;}
-                            Rectangle {height:1px;background:MusicTheme.line;}
+                            Divider {}
                             Title {text:"原始资源";}
-                            Note {text:root.cache-label;wrap:word-wrap;color:root.cached ? MusicTheme.success : MusicTheme.muted;}
+                            Note {text:root.cache-label;wrap:word-wrap;color:root.cached ? ActorsTheme.success : ActorsTheme.muted;}
                             HorizontalLayout {height:34px;spacing:7px;
                                 Action {text:"下载缓存";enabled:!root.cached && !root.busy;clicked=>{root.action("download","");}}
                                 Action {text:"删除缓存";enabled:root.own-cached && !root.busy;clicked=>{root.action("delete-cache","");}}
                             }
-                            Rectangle {height:1px;background:MusicTheme.line;}
+                            Divider {}
                             Title {text:"编译音频";}
-                            Note {text:root.compile-label;wrap:word-wrap;color:root.compiled ? MusicTheme.success : MusicTheme.muted;}
+                            Note {text:root.compile-label;wrap:word-wrap;color:root.compiled ? ActorsTheme.success : ActorsTheme.muted;}
                             Note {text:root.compiled ? "WAV · 可直接播放和导出" : root.cached ? "原始缓存就绪，可提前编译" : "请先下载原始资源";wrap:word-wrap;}
                             HorizontalLayout {height:34px;spacing:7px;
                                 Action {text:"提前编译";enabled:root.cached && !root.compiled && !root.busy;clicked=>{root.action("compile","");}}
                                 Action {text:"删除编译";enabled:root.compiled && !root.busy;clicked=>{root.action("delete-compiled","");}}
                             }
                             export-button := Action {text:"导出所选歌曲";primary:true;enabled:!root.busy;clicked=>{root.action("export","");}}
-                            Rectangle {height:1px;background:MusicTheme.line;}
+                            Divider {}
                             Note {text:"资源文件名";}
-                            Text {text:root.resource;color:MusicTheme.text;font-size:11px;wrap:word-wrap;min-width:0px;}
+                            Text {text:root.resource;color:ActorsTheme.text;font-size:11px;wrap:word-wrap;min-width:0px;}
                         }
                     }
                 }

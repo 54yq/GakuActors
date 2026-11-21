@@ -74,6 +74,7 @@ inline bool Decode(const std::string& bytes,const UiSnapshot& snapshot,Command& 
         auto j=Json::parse(bytes,nullptr,false);if(!j.is_object()||!j.contains("version")||j["version"]!=kVersion||!j.contains("action")||!j["action"].is_string())return false;
         const auto action=j["action"].get<std::string>();
         if(action=="scan")command={Action::Scan};
+        else if(action=="scan_scene")command={Action::ScanScene};
         else if(action=="read_pre_live_catalog")command={Action::ReadDesktopCatalog};
         else if(action=="reload")command={Action::Reload};
         else if(action=="scan_resources")command={Action::ScanResources};

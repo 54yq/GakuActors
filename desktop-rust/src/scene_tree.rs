@@ -5,6 +5,7 @@ use std::{collections::{BTreeMap,HashMap,HashSet},fs::{self,OpenOptions},io::{se
 
 #[derive(Clone,Debug)]
 pub struct TreeRow {
+    pub path: Vec<String>,
     pub value:Value,
     /// Runtime key for the UI selection; must be revalidated by the plugin.
     pub key:String,
@@ -98,14 +99,21 @@ pub fn separated_resources(resources: &[Value]) -> Vec<Value> {
         if id(v, "kind") < 2 { return Some(v.clone()); }
         let scene = id(v, "scene");
         let instance = id(v, "instance");
+        if moving.contains(&(scene, instance)) { return None; }
+        // The controllable prop is the root of its visual subtree. Keep that
+        // identity, and list its descendants under it for inspection.
+        let mut row = v.clone();
         let mut current = instance;
         for _ in 0..128 {
-            if moving.contains(&(scene, current)) { return None; }
+            if moving.contains(&(scene, current)) {
+                row["moving_member"] = true.into();
+                row["locked"] = true.into();
+                return Some(row);
+            }
             let Some(&parent) = parents.get(&(scene, current)) else { break };
             if parent == 0 { break; }
             current = parent;
         }
-        let mut row = v.clone();
         if protected.contains(&(scene, instance)) {
             row["locked"] = true.into();
             row["contains_moving_asset"] = true.into();
@@ -117,11 +125,14 @@ pub fn separated_resources(resources: &[Value]) -> Vec<Value> {
 /// Build visible rows for either the scene tree or props. Expanding and search
 /// are view-only. Search retains all ancestors and temporarily expands matches.
 pub fn build(resources:&[Value],scene_name:&str,props:bool,collapsed:&HashSet<String>,query:&str,notes:&BTreeMap<String,String>)->Vec<TreeRow> {
-    let items:Vec<Value>=resources.iter().filter(|v|if props{id(v,"kind")==1}else{id(v,"kind")>=2}).cloned().collect();
+    let items:Vec<Value>=resources.iter().filter(|v|{
+        let member=v["moving_member"]==true;
+        if props { id(v,"kind")==1||member } else { id(v,"kind")>=2&&!member }
+    }).cloned().collect();
     let n=items.len();let mut ids:HashMap<(i64,i64),Vec<usize>>=HashMap::new();
     for (i,v) in items.iter().enumerate(){ids.entry((id(v,"scene"),id(v,"instance"))).or_default().push(i);}
     let mut parent=vec![None;n];let mut unsafe_path=vec![false;n];let mut children=vec![Vec::<usize>::new();n];
-    if !props {for (i,v) in items.iter().enumerate(){let p=id(v,"parent");if p!=0 {if let Some(xs)=ids.get(&(id(v,"scene"),p)) {if xs.len()==1&&xs[0]!=i {parent[i]=Some(xs[0]);}}if parent[i].is_none(){unsafe_path[i]=true;}}}}
+    for (i,v) in items.iter().enumerate(){let p=id(v,"parent");if p!=0 {if let Some(xs)=ids.get(&(id(v,"scene"),p)) {if xs.len()==1&&xs[0]!=i {parent[i]=Some(xs[0]);}}if parent[i].is_none(){unsafe_path[i]=true;}}}
     // Cut cycles, which otherwise make a subtree disappear or loop forever.
     for i in 0..n {let mut seen=HashSet::new();let mut cur=Some(i);while let Some(x)=cur {if !seen.insert(x){parent[i]=None;unsafe_path[i]=true;break;}cur=parent[x];}}
     for i in 0..n {if let Some(p)=parent[i]{children[p].push(i);}}
@@ -141,14 +152,16 @@ pub fn build(resources:&[Value],scene_name:&str,props:bool,collapsed:&HashSet<St
         let candidate=format!("{} {} {} {} {}",str_field(v,"name"),category(v),guess(str_field(v,"name")).unwrap_or(""),function_tag(str_field(v,"name")).unwrap_or(""),note).to_lowercase();
         if candidate.contains(&q){let mut cur=Some(i);while let Some(x)=cur{if included[x]{break;}included[x]=true;cur=parent[x];}}
     }}
-    fn walk(i:usize,depth:usize,items:&[Value],children:&[Vec<usize>],stable:&[Option<String>],keys:&[String],included:&[bool],collapsed:&HashSet<String>,q:&str,notes:&BTreeMap<String,String>,out:&mut Vec<TreeRow>) {
-        if !included[i] {return;}
+    let mut output=Vec::new();
+    let mut pending:Vec<_>=(0..n).rev().filter(|&i|parent[i].is_none()).map(|i|(i,0)).collect();
+    while let Some((i,depth))=pending.pop() {
+        if !included[i] {continue;}
         let expandable=children[i].iter().any(|c|included[*c]);let expanded=expandable&&(!q.is_empty()||!collapsed.contains(&keys[i]));
         let note=stable[i].as_ref().and_then(|k|notes.get(k)).cloned().unwrap_or_default();
-        out.push(TreeRow{value:items[i].clone(),key:selected_key(&items[i]),note_key:stable[i].clone(),collapse_key:keys[i].clone(),depth,has_children:expandable,expanded,guess:guess(str_field(&items[i],"name")),note});
-        if expanded {for &child in &children[i]{walk(child,depth+1,items,children,stable,keys,included,collapsed,q,notes,out);}}
+        let path=stable[i].as_ref().and_then(|k|serde_json::from_str::<(String,Vec<String>)>(k).ok()).map(|(_,names)|names).unwrap_or_default();
+        output.push(TreeRow{path,value:items[i].clone(),key:selected_key(&items[i]),note_key:stable[i].clone(),collapse_key:keys[i].clone(),depth,has_children:expandable,expanded,guess:guess(str_field(&items[i],"name")),note});
+        if expanded {pending.extend(children[i].iter().rev().map(|&child|(child,depth+1)));}
     }
-    let mut output=Vec::new();for i in 0..n {if parent[i].is_none(){walk(i,0,&items,&children,&stable,&keys,&included,collapsed,&q,notes,&mut output);}}
     output
 }
 
@@ -162,7 +175,7 @@ pub fn load_notes(path:&Path)->io::Result<BTreeMap<String,String>> {
     let entries=v["notes"].as_object().ok_or_else(||io::Error::new(io::ErrorKind::InvalidData,"备注格式错误"))?;
     if entries.len()>10000 {return Err(io::Error::new(io::ErrorKind::InvalidData,"备注数量过多"));}
     let mut out=BTreeMap::new();for (k,v) in entries {let s=v.as_str().ok_or_else(||io::Error::new(io::ErrorKind::InvalidData,"备注内容错误"))?;
-        if k.len()>4096||s.len()>1024||s.chars().any(char::is_control){return Err(io::Error::new(io::ErrorKind::InvalidData,"备注内容无效"));}out.insert(k.clone(),s.to_owned());}Ok(out)
+        if k.len()>4096||!valid_note(s){return Err(io::Error::new(io::ErrorKind::InvalidData,"备注内容无效"));}out.insert(k.clone(),s.to_owned());}Ok(out)
 }
 #[cfg(windows)]
 fn replace_file(from:&Path,to:&Path)->io::Result<()> {
@@ -176,7 +189,7 @@ fn replace_file(from:&Path,to:&Path)->io::Result<()> {fs::rename(from,to)}
 /// Call only after a successful `load_notes`. Writes a unique temporary file in
 /// the same directory, syncs it, then replaces the target atomically.
 pub fn save_notes(path:&Path,notes:&BTreeMap<String,String>)->io::Result<()> {
-    if notes.len()>10000||notes.iter().any(|(k,v)|k.len()>4096||v.len()>1024||v.chars().any(char::is_control)){return Err(io::Error::new(io::ErrorKind::InvalidInput,"备注内容无效"));}
+    if notes.len()>10000||notes.iter().any(|(k,v)|k.len()>4096||!valid_note(v)){return Err(io::Error::new(io::ErrorKind::InvalidInput,"备注内容无效"));}
     let bytes=serde_json::to_vec(&json!({"version":1,"notes":notes})).map_err(io::Error::other)?;
     if bytes.len()>2*1024*1024{return Err(io::Error::new(io::ErrorKind::InvalidInput,"备注文件过大"));}
     write_atomic(path, &bytes)
@@ -212,15 +225,21 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let prop = json!({"scene":10,"generation":1,"kind":1,"instance":2,"name":"Prop_Microphone"});
         let resources = separated_resources(&[node(1,0,"Stage"),node(2,1,"Prop_Microphone"),
             node(3,2,"MicrophoneMesh"),node(4,1,"PostEffect_Bloom"),prop]);
-        assert_eq!(resources.len(), 3);
+        assert_eq!(resources.len(), 4);
         assert_eq!(resources[0]["locked"], true);
         assert_eq!(resources[0]["contains_moving_asset"], true);
-        assert_eq!(category(&resources[1]), "灯光与后处理");
+        assert_eq!(category(&resources[2]), "灯光与后处理");
         let fixed = build(&resources, "Live", false, &HashSet::new(), "泛光", &BTreeMap::new());
         assert_eq!(fixed.len(), 2);
         let props = build(&resources, "Live", true, &HashSet::new(), "麦克风", &BTreeMap::new());
-        assert_eq!(props.len(), 1);
+        assert_eq!(props.len(), 2);
+        let parts = build(&resources, "Live", true, &HashSet::new(), "MicrophoneMesh", &BTreeMap::new());
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1].depth, 1);
+        assert_eq!(parts[1].value["locked"], true);
     }
     #[test] fn ambiguous_paths_are_not_persisted(){let nodes=vec![node(1,0,"Same"),node(2,0,"Same")];let rows=build(&nodes,"Live",false,&HashSet::new(),"",&BTreeMap::new());assert!(rows.iter().all(|x|x.note_key.is_none()));assert!(build(&nodes,"",false,&HashSet::new(),"",&BTreeMap::new()).iter().all(|x|x.note_key.is_none()));}
     #[test] fn note_storage_roundtrip_and_rejects_corruption(){let nonce=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();let dir=std::env::current_dir().unwrap().join("target").join(format!("gaku-scene-notes-{}-{nonce}",std::process::id()));fs::create_dir_all(&dir).unwrap();let path=dir.join("notes.json");let mut v=load_notes(&path).unwrap();v.insert("scene/path".into(),"桌椅".into());save_notes(&path,&v).unwrap();assert_eq!(load_notes(&path).unwrap(),v);v.insert("other".into(),"舞台".into());save_notes(&path,&v).unwrap();assert_eq!(load_notes(&path).unwrap(),v);fs::write(&path,b"broken").unwrap();assert!(load_notes(&path).is_err());fs::remove_file(path).unwrap();fs::remove_dir(dir).unwrap();}
 }
+
+pub fn valid_note(text:&str)->bool {text.len()<=1024&&!text.chars().any(|c|c.is_control()&&c!='\n')}

@@ -78,7 +78,6 @@ impl State {
  fn scan(&mut self,ui:&MusicWindow){if self.busy{return}self.busy=true;ui.set_notice("正在读取游戏歌曲清单…".into());self.render(ui);let tx=self.tx.clone();std::thread::spawn(move||{let _=tx.send(Event::Scan(music::scan()));});}
  fn action(&mut self,ui:&MusicWindow,action:&str,arg:&str){
     if let Some(op)=BulkAction::parse(action){self.bulk(ui,op);return}
-    if action=="theme"{platform::sync_title_bar(ui.window(),ui.get_theme_index());if let Err(e)=preview::save_theme(ui.get_theme_index()){ui.set_notice(e.into());}return}
     if action=="multi-toggle"{if !self.busy{self.multi_mode=!self.multi_mode;self.checked.clear();self.render(ui);}return}
     if action=="clear-checks"{if !self.busy{self.checked.clear();self.render(ui);}return}
     if action=="check"{if self.multi_mode&&!self.busy&&self.songs.iter().any(|s|field(s,"name")==arg){if !self.checked.remove(arg){self.checked.insert(arg.into());}self.render(ui);}return}
@@ -106,13 +105,13 @@ impl State {
 pub fn run()->Result<(),slint::PlatformError>{
  platform::configure_font_fallback();
  let ui=MusicWindow::new()?;let (tx,rx)=mpsc::channel();let state=Rc::new(RefCell::new(State{songs:Vec::new(),selected:String::new(),playing_name:String::new(),checked:HashSet::new(),multi_mode:false,busy:false,player:preview::Player::new(),tx,alive:Arc::new(AtomicBool::new(true))}));
- ui.set_theme_index(preview::load_theme());ui.set_volume(state.borrow().player.volume as f32);state.borrow_mut().scan(&ui);
+ ui.set_volume(state.borrow().player.volume as f32);state.borrow_mut().scan(&ui);
  let weak=ui.as_weak();let st=state.clone();ui.on_action(move|a,b|{if let Some(ui)=weak.upgrade(){st.borrow_mut().action(&ui,&a,&b);}});
  let weak=ui.as_weak();let st=state.clone();ui.on_search_changed(move||{if let Some(ui)=weak.upgrade(){let mut st=st.borrow_mut();st.sync_selection(&ui);st.render(&ui);}});
  let weak=ui.as_weak();let st=state.clone();ui.on_seek(move|value|{if let Some(ui)=weak.upgrade(){let mut st=st.borrow_mut();let at=(value.clamp(0.0,1000.0)*st.player.length as f32/1000.0) as u32;if let Err(e)=st.player.seek(at){ui.set_notice(e.into());}}});
  let weak=ui.as_weak();let st=state.clone();ui.on_volume_changed(move|value|{if let Some(ui)=weak.upgrade(){let mut st=st.borrow_mut();let value=value.round().clamp(0.0,100.0) as u32;if let Err(e)=st.player.set_volume(value){ui.set_notice(e.into());}}});
  let weak=ui.as_weak();let st=state.clone();ui.on_volume_save(move||{if let Some(ui)=weak.upgrade(){if let Err(e)=preview::save_volume(st.borrow().player.volume){ui.set_notice(e.into());}}});
- let timer=slint::Timer::default();let weak=ui.as_weak();let st=state.clone();let mut title_bar_ready=false;timer.start(slint::TimerMode::Repeated,Duration::from_millis(250),move||{let Some(ui)=weak.upgrade()else{return};if !title_bar_ready{title_bar_ready=platform::sync_title_bar(ui.window(),ui.get_theme_index());}let mut st=st.borrow_mut();let mut changed=false;for event in rx.try_iter(){if let Event::BulkProgress(message)=event{ui.set_notice(message.into());continue}st.busy=false;changed=true;match event{
+ let timer=slint::Timer::default();let weak=ui.as_weak();let st=state.clone();let mut title_bar_ready=false;timer.start(slint::TimerMode::Repeated,Duration::from_millis(250),move||{let Some(ui)=weak.upgrade()else{return};if !title_bar_ready{title_bar_ready=platform::sync_title_bar(ui.window(),2);}let mut st=st.borrow_mut();let mut changed=false;for event in rx.try_iter(){if let Event::BulkProgress(message)=event{ui.set_notice(message.into());continue}st.busy=false;changed=true;match event{
     Event::Scan(Ok(songs))=>{ui.set_notice(format!("检索完成：{} 个版本。",songs.len()).into());st.songs=songs;let names:HashSet<String>=st.songs.iter().map(|s|field(s,"name").to_owned()).collect();st.checked.retain(|n|names.contains(n));st.sync_selection(&ui);},Event::Scan(Err(e))=>ui.set_notice(e.into()),
     Event::Job(name,r)=>ui.set_notice(match r{Ok(())=>format!("操作完成：{name}").into(),Err(e)=>e.into()}),
     Event::BulkComplete(message)=>ui.set_notice(message.into()),Event::BulkProgress(_)=>{},
@@ -120,7 +119,7 @@ pub fn run()->Result<(),slint::PlatformError>{
  }for song in &mut st.songs {music::refresh(song);}}
  if !st.busy&&st.player.finished(){let _=st.player.stop();ui.set_notice("本曲播放完毕。".into());st.render(&ui);}
  if changed{st.render(&ui)}let pos=st.player.position().unwrap_or(0);let len=st.player.length;let time=|v:u32|format!("{:02}:{:02}",v/60000,(v/1000)%60);ui.set_current_time(time(pos).into());ui.set_total_time(time(len).into());if !ui.get_seeking(){ui.set_seek_value(if len>0{pos as f32*1000.0/len as f32}else{0.0});}});
- ui.show()?;platform::sync_title_bar(ui.window(),ui.get_theme_index());
+ ui.show()?;platform::sync_title_bar(ui.window(),2);
  // Observe without consuming events: a click outside search must also perform
  // its original action, including on otherwise non-focusable list rows.
  {
@@ -141,6 +140,30 @@ pub fn run()->Result<(),slint::PlatformError>{
  let result=ui.run();state.borrow().alive.store(false,Ordering::Release);result
 }
 
+#[cfg(test)]
+pub(crate) fn visual_fixture() -> MusicWindow {
+    let ui = MusicWindow::new().unwrap();
+    ui.set_scope_title("全部歌曲".into());
+    ui.set_result_label("3 首".into());
+    ui.set_groups(Rc::new(VecModel::from(vec![
+        GroupRow { key: "all".into(), label: "全部歌曲".into(), count: 3, selected: true },
+        GroupRow { key: "fktn".into(), label: "藤田琴音".into(), count: 2, selected: false },
+    ])).into());
+    ui.set_songs(Rc::new(VecModel::from(vec![
+        SongRow { name: "demo-a".into(), title: "初".into(), subtitle: "藤田琴音".into(), variant: "Live".into(),
+            cached: "已缓存".into(), selected: true, ..Default::default() },
+        SongRow { name: "demo-b".into(), title: "光景".into(), subtitle: "篠澤広".into(), ..Default::default() },
+        SongRow { name: "demo-c".into(), title: "世界一可愛い私".into(), subtitle: "藤田琴音".into(), ..Default::default() },
+    ])).into());
+    ui.set_detail_title("初".into());
+    ui.set_detail_subtitle("藤田琴音 · Live".into());
+    ui.set_has_song(true);
+    ui.set_cached(true);
+    ui.set_now_title("初".into());
+    ui.set_now_artist("藤田琴音".into());
+    ui
+}
+
 #[cfg(test)] mod layout_tests {
  use super::*;
  use slint::platform::{Platform,PlatformError,WindowAdapter,software_renderer::{MinimalSoftwareWindow,RepaintBufferType}};
@@ -150,9 +173,9 @@ pub fn run()->Result<(),slint::PlatformError>{
    #[edition="1.19"]
    export component FontFallbackProbe inherits Window {
      in property <string> family:"Microsoft YaHei UI";
-     default-font-family:root.family; background:#ffffff;
+     default-font-family:root.family; background:#101219;
      in property <string> sample:"∀";
-     Text {text:root.sample;font-size:32px;color:#000000;}
+     Text {text:root.sample;font-size:32px;color:#eff1f7;}
    }
  }
  impl Platform for TestPlatform {fn create_window_adapter(&self)->Result<Rc<dyn WindowAdapter>,PlatformError>{Ok(self.window.clone())}}
@@ -174,7 +197,7 @@ pub fn run()->Result<(),slint::PlatformError>{
    // Exercise the actual software renderer. YaHei has no U+2200; its fallback
    // must draw the same glyph as an explicit Segoe UI Symbol font request.
    let probe=FontFallbackProbe::new().unwrap();probe.show().unwrap();window.set_size(PhysicalSize::new(200,60));
-   let glyph_shape=|pixels:&[Rgb8Pixel]|{let ink:Vec<(usize,usize)>=pixels.iter().enumerate().filter(|(_,p)|p.r<128&&p.g<128&&p.b<128).map(|(i,_)|(i%200,i/200)).collect();assert!(ink.len()>50,"U+2200 must render through the symbol fallback");let left=ink.iter().map(|(x,_)|*x).min().unwrap();let top=ink.iter().map(|(_,y)|*y).min().unwrap();ink.into_iter().map(|(x,y)|(x-left,y-top)).collect::<Vec<_>>()};
+   let glyph_shape=|pixels:&[Rgb8Pixel]|{let ink:Vec<(usize,usize)>=pixels.iter().enumerate().filter(|(_,p)|p.r>128&&p.g>128&&p.b>128).map(|(i,_)|(i%200,i/200)).collect();assert!(ink.len()>50,"U+2200 must render through the symbol fallback");let left=ink.iter().map(|(x,_)|*x).min().unwrap();let top=ink.iter().map(|(_,y)|*y).min().unwrap();ink.into_iter().map(|(x,y)|(x-left,y-top)).collect::<Vec<_>>()};
    let mut pixels=vec![Rgb8Pixel::default();200*60];window.draw_if_needed(|renderer|{renderer.render(&mut pixels,200);});let fallback=glyph_shape(&pixels);
    probe.set_family("Segoe UI Symbol".into());slint::platform::update_timers_and_animations();window.draw_if_needed(|renderer|{renderer.render(&mut pixels,200);});assert_eq!(fallback,glyph_shape(&pixels));
    probe.set_family("Microsoft YaHei UI".into());probe.set_sample("∀ﾟ".into());slint::platform::update_timers_and_animations();window.draw_if_needed(|renderer|{renderer.render(&mut pixels,200);});let mixed=glyph_shape(&pixels);
@@ -190,7 +213,7 @@ pub fn run()->Result<(),slint::PlatformError>{
    st.action(&ui,"multi-toggle","");assert!(!ui.get_multi_mode());assert!(st.checked.is_empty());assert!(ui.get_filter_open());ui.set_filter_open(false);
    let actions=Rc::new(RefCell::new(Vec::<String>::new()));let recorded=actions.clone();ui.on_action(move|a,_|recorded.borrow_mut().push(a.to_string()));
    ui.set_resource("sud_music_general_hkne-001-hkne_game-inst.awb".into());
-   for theme in 0..3 {ui.set_theme_index(theme);slint::platform::update_timers_and_animations();
+   for theme in [2] {slint::platform::update_timers_and_animations();
    for (w,h) in [(1040,660),(1280,800),(1920,1080)] {
      window.set_size(PhysicalSize::new(w,h));let mut pixels=vec![Rgb8Pixel::default();(w*h) as usize];
      window.draw_if_needed(|renderer|{renderer.render(&mut pixels,w as usize);});
@@ -212,14 +235,14 @@ pub fn run()->Result<(),slint::PlatformError>{
    click(1920.0-55.0,34.0);assert!(actions.borrow().iter().any(|a|a=="scan"),"custom controls must deliver pointer clicks");
    ui.set_playing(true);let seeked=Rc::new(RefCell::new(0.0));let value=seeked.clone();ui.on_seek(move|v|*value.borrow_mut()=v);
    click(12.0+444.0+ui.get_layout_progress_width()*0.7,1080.0-112.0+41.0);assert!(*seeked.borrow()>600.0&&*seeked.borrow()<800.0,"the themed seek track must remain interactive");
-   ui.set_theme_index(0);ui.set_playing(false);ui.set_filter_open(true);st.action(&ui,"multi-toggle","");st.action(&ui,"check","track-a");st.action(&ui,"check","track-b");assert_eq!(ui.get_checked_count(),2);assert!(ui.get_multi_mode());
+   ui.set_playing(false);ui.set_filter_open(true);st.action(&ui,"multi-toggle","");st.action(&ui,"check","track-a");st.action(&ui,"check","track-b");assert_eq!(ui.get_checked_count(),2);assert!(ui.get_multi_mode());
    ui.set_resource("sud_music_general_hkne-001-hkne_game-inst.awb".into());window.set_size(PhysicalSize::new(1280,800));slint::platform::update_timers_and_animations();let mut pixels=vec![Rgb8Pixel::default();1280*800];window.draw_if_needed(|renderer|{renderer.render(&mut pixels,1280);});
    if let Some(path)=std::env::var_os("GAKU_MUSIC_LAYOUT_SNAPSHOT"){let file=std::fs::File::create(std::path::PathBuf::from(path).with_file_name("approved-multi.png")).unwrap();let mut encoder=png::Encoder::new(file,1280,800);encoder.set_color(png::ColorType::Rgb);encoder.set_depth(png::BitDepth::Eight);let mut writer=encoder.write_header().unwrap();let bytes:Vec<u8>=pixels.iter().flat_map(|p|[p.r,p.g,p.b]).collect();writer.write_image_data(&bytes).unwrap();}
    window.set_size(PhysicalSize::new(1280,800));
    let original="奇迹正是现在(ﾟ∀ﾟ)！";st.action(&ui,"multi-toggle","");ui.set_filter_open(false);st.songs[0]["title"]=original.into();st.playing_name="track-a".into();st.selected="track-a".into();st.render(&ui);
    st.action(&ui,"group","冰渡香名江");assert!(ui.get_groups().iter().any(|g|g.selected&&g.key=="冰渡香名江"));
    assert_eq!(ui.get_detail_title().as_str(),original);assert_eq!(ui.get_now_title().as_str(),original);
-   for theme in 0..3 {ui.set_theme_index(theme);slint::platform::update_timers_and_animations();let mut pixels=vec![Rgb8Pixel::default();1280*800];window.draw_if_needed(|renderer|{renderer.render(&mut pixels,1280);});
+   for theme in [2] {slint::platform::update_timers_and_animations();let mut pixels=vec![Rgb8Pixel::default();1280*800];window.draw_if_needed(|renderer|{renderer.render(&mut pixels,1280);});
      if let Some(path)=std::env::var_os("GAKU_MUSIC_LAYOUT_SNAPSHOT"){let file=std::fs::File::create(std::path::PathBuf::from(path).with_file_name(format!("font-fallback-theme-{theme}.png"))).unwrap();let mut encoder=png::Encoder::new(file,1280,800);encoder.set_color(png::ColorType::Rgb);encoder.set_depth(png::BitDepth::Eight);let mut writer=encoder.write_header().unwrap();let bytes:Vec<u8>=pixels.iter().flat_map(|p|[p.r,p.g,p.b]).collect();writer.write_image_data(&bytes).unwrap();}
    }
  }

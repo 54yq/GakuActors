@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "gakuactors-desktop"
-version = "0.5.2"
+version = "0.5.7"
 dependencies = [
  "base64 0.22.1",
  "png 0.17.16",

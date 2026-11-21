@@ -485,9 +485,14 @@ public:
             }
             Trace(head?"Catalog phase: CostumeHeadMaster END":"Catalog phase: CostumeMaster END");
         }
+        out.defaults.erase(std::remove_if(out.defaults.begin(),out.defaults.end(),[&](const auto& p){return p.factory.empty()&&!FindPart(out.heads,p.head);}),out.defaults.end());
+        if(includeSpecial)AddSpecialCatalogEntries(out);
+        out.notice="已读取游戏人物、服装与头部目录；资源加载状态尚待验证";return out;
+    }
+    void AddSpecialCatalogEntries(Catalog& out) {
         Trace("Catalog phase: optional special descriptors BEGIN");
         struct Special {const char* factory;const char* label;};
-        if(includeSpecial)for(const auto& entry:std::vector<Special>{{"CreateTeacherDescriptor","老师"},{"CreateTeacherGlassHairDescriptor","老师（眼镜／发型）"},
+        for(const auto& entry:std::vector<Special>{{"CreateTeacherDescriptor","老师"},{"CreateTeacherGlassHairDescriptor","老师（眼镜／发型）"},
             {"CreateVocalTrainerDescriptor","歌唱训练员"},{"CreateDanceTrainerDescriptor","舞蹈训练员"},{"CreateVisualTrainerDescriptor","视觉训练员"}}) {
             try {
                 Pin descriptor(*this,Factory(entry.factory));if(!descriptor.Get())continue;
@@ -515,9 +520,7 @@ public:
                 out.defaults.push_back({std::string("builtin:")+entry.factory,entry.label,id,{},{},entry.factory,{},{},{},true});
             } catch(const std::exception&) {/* Missing optional factory never rejects normal outfits. */}
         }
-        out.defaults.erase(std::remove_if(out.defaults.begin(),out.defaults.end(),[&](const auto& p){return p.factory.empty()&&!FindPart(out.heads,p.head);}),out.defaults.end());
         Trace("Catalog phase: optional special descriptors END");
-        out.notice="已读取游戏人物、服装与头部目录；资源加载状态尚待验证";return out;
     }
     void* Descriptor(const Preset& p) {
         if(!p.factory.empty())return Factory(p.factory);
@@ -713,8 +716,8 @@ public:
         }
         Trace(("Diagnostic actors END: inspected="+std::to_string((std::min)(count,size_t{64}))).c_str());return true;
     }
-    void SuspendScene() {
-        StopResourceScan();
+    void SuspendScene(bool keepCatalogResourceScan=false) {
+        if(!keepCatalogResourceScan)StopResourceScan();
         CancelModelEdit();
         creationEnabled_=false;CancelPending();
         for(auto it=owned_.begin();it!=owned_.end();) {

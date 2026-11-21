@@ -1,0 +1,127 @@
+export global ActorsTheme {
+    out property <color> accent:#beb8ff;
+    out property <color> text:#eff1f7;
+    out property <color> muted:#a7b0c5;
+    out property <color> line:#2b3243;
+    out property <color> paper:#101219;
+    out property <color> panel:#1a1e29;
+    out property <color> header:#171a24;
+    out property <color> aside:#151821;
+    out property <color> soft:#252b3c;
+    out property <color> selection:#2b2a49;
+    out property <color> inset:#131620;
+    out property <color> success:#85d8ae;
+    out property <color> on-accent:#171531;
+    out property <color> control:#222838;
+    out property <color> control-line:#394257;
+    out property <color> tag:#212b40;
+    out property <color> tag-line:#3a455e;
+    out property <color> tag-text:#bfcdf6;
+    out property <color> nav-text:#bbc3d6;
+    out property <color> selected-text:#e1ddff;
+    out property <color> hint:#25253c;
+    out property <color> warning:#e7c17c;
+    out property <length> header-height:65px;
+    out property <length> sidebar-width:186px;
+    out property <length> content-gutter:24px;
+    out property <length> workspace-gap:16px;
+}
+
+export component Panel inherits Rectangle {
+    background: ActorsTheme.panel;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: ActorsTheme.line;
+}
+export component Divider inherits Rectangle {
+    height: 1px;
+    background: ActorsTheme.line;
+}
+export component PageTitle inherits Text {
+    color: ActorsTheme.text;
+    font-size: 27px;
+    font-weight: 700;
+    min-width: 0px;
+    overflow: elide;
+    vertical-stretch: 0;
+}
+export component SelectionMark inherits Rectangle {
+    x: 0px;
+    y: 0px;
+    width: 3px;
+
+    background: ActorsTheme.accent;
+    border-radius: 1px;
+}
+
+
+export component NightCheck inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in-out property <bool> checked;
+    callback toggled();
+    height: 24px;
+    horizontal-stretch: 0;
+    accessible-role: checkbox;
+    accessible-checkable: true;
+    accessible-checked <=> root.checked;
+    accessible-enabled: root.enabled;
+    accessible-label: root.text;
+    accessible-action-default => { root.toggle(); }
+    forward-focus: keyboard;
+
+    function toggle() {
+        if (root.enabled) {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 6px;
+        Rectangle {
+            height: 15px;
+            width: 15px;
+            cross-axis-self-alignment: center;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: !root.enabled ? ActorsTheme.line : root.checked || keyboard.has-focus
+                ? ActorsTheme.accent : ActorsTheme.control-line;
+            background: root.checked ? (root.enabled ? ActorsTheme.accent : ActorsTheme.soft)
+                : (pointer.has-hover ? ActorsTheme.control : ActorsTheme.inset);
+            if root.checked: Path {
+                x: 2px;
+                y: 2px;
+                width: 11px;
+                height: 11px;
+                viewbox-width: 12;
+                viewbox-height: 12;
+                commands: "M2 6 L5 9 L10 3";
+                fill: transparent;
+                stroke: root.enabled ? ActorsTheme.on-accent : ActorsTheme.muted;
+                stroke-width: 1.8px;
+            }
+        }
+        if root.text != "": Text {
+            text: root.text;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+            color: root.enabled ? ActorsTheme.text : ActorsTheme.muted.with-alpha(0.65);
+        }
+    }
+    keyboard := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.toggle();
+                return accept;
+            }
+            return reject;
+        }
+        pointer := TouchArea {
+            enabled: root.enabled;
+            clicked => { keyboard.focus(); root.toggle(); }
+        }
+    }
+}

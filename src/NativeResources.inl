@@ -211,10 +211,18 @@ void TraceSuitcaseRenderers(void* actor) {
         }
     }catch(const std::exception& e){Trace((std::string("Suitcase diagnostic unavailable: ")+e.what()).c_str());}
 }
-std::vector<SceneResource> ScanResources() {
-    std::vector<SceneResource> items;if(!PerformanceScene())return items;
+std::vector<SceneResource> ScanResources(bool readOnly=false) {
+    std::vector<SceneResource> items;
+    if(!readOnly&&!PerformanceScene())return items;
+    if(!Ready())throw std::runtime_error("游戏运行时尚未就绪");
+    const int activeScene=ActiveSceneHandle();
+    const int scene=readOnly?activeScene:PerformanceScene();
+    if(!scene||!activeScene)throw std::runtime_error("当前场景尚未就绪");
     ClearResourceCandidates();++resourceGeneration_;if(!resourceGeneration_)++resourceGeneration_;
-    const int scene = PerformanceScene();
+    auto append=[&](SceneResource item,void* object,void* actor=nullptr,const std::string& root={},const std::string& prop={}){
+        if(readOnly){item.locked=true;items.push_back(std::move(item));}
+        else RememberResource(items,std::move(item),object,actor,root,prop);
+    };
     struct ActorNodes { void* actor; void* transform; std::string label; };
     std::vector<ActorNodes> actors;
     std::vector<void*> protectedTransforms;
@@ -224,7 +232,7 @@ std::vector<SceneResource> ScanResources() {
         const int id = Int(actor, "GetInstanceID");
         if (!id) continue;
         auto label = Text(go, "get_name");
-        RememberResource(items, {SceneResourceKind::ActorModel, id, id, scene, resourceGeneration_,
+        append({SceneResourceKind::ActorModel, id, id, scene, resourceGeneration_,
             label, ResourceHidden(id, SceneResourceKind::ActorModel)}, actor);
         void* transform = Call(On(go, "get_transform"), go);
         if (!transform) continue;
@@ -251,26 +259,18 @@ std::vector<SceneResource> ScanResources() {
                     label, ResourceHidden(propId, SceneResourceKind::Prop)};
                 item.active = Bool(prop, "get_activeSelf");
                 item.locked = propName == "Prop_Hknesuitcase" && !PropGeometry(root, scene, rootName, propName);
-                RememberResource(items, std::move(item), prop, actor.actor, rootName, propName);
-                if (propName == "Prop_Hknesuitcase") TraceSuitcaseRenderers(actor.actor);
+                append(std::move(item), prop, actor.actor, rootName, propName);
+                if (!readOnly && propName == "Prop_Hknesuitcase") TraceSuitcaseRenderers(actor.actor);
             }
         } catch (const std::exception& e) {
             Trace((std::string("Actor prop scan incomplete: ") + e.what()).c_str());
         }
     }
-    int activeScene{};
-    try { activeScene = ActiveSceneHandle(); }
-    catch (const std::exception& e) {
-        Trace((std::string("Active scene unavailable: ") + e.what()).c_str());
-        return items;
-    }
     for(void* camera:Objects(Class("UnityEngine","Camera"))) {
         void* go=GameObject(camera);if(!go||SceneOf(go)!=activeScene)continue;
         if(void* transform=Call(On(camera,"get_transform"),camera))protectedTransforms.push_back(transform);
     }
-    std::vector<void*> stageObjects;
-    try{stageObjects=ActiveSceneObjects();}
-    catch(const std::exception& e){Trace((std::string("Scene node scan unavailable: ")+e.what()).c_str());return items;}
+    const auto stageObjects=ActiveSceneObjects();
     struct Node {void* go{};void* transform{};int id{},parent{},depth{};std::string name;bool locked{};};
     std::vector<Node> nodes;std::unordered_map<int,size_t> byId;
     for(void* go:stageObjects) {
@@ -303,7 +303,7 @@ std::vector<SceneResource> ScanResources() {
         const bool active=Bool(node.go,"get_activeSelf"),owned=ResourceHidden(node.id,kind);
         SceneResource item{kind,node.id,node.id,activeScene,resourceGeneration_,name,owned};
         item.parent=node.parent;item.depth=node.depth;item.active=active;item.locked=protectedActor||(!active&&!owned);
-        RememberResource(items,std::move(item),node.go);
+        append(std::move(item),node.go);
     }
     return items;
 }

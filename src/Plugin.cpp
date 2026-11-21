@@ -1,3 +1,4 @@
+#include "CatalogStartupRead.hpp"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -14,7 +15,6 @@
 #include "DesktopListener.hpp"
 #include "FreeCamera.hpp"
 #include "GakuDiagnostics.hpp"
-#include "CatalogStartupRead.hpp"
 #include "ResourceOwnership.hpp"
 #include <atomic>
 #include <mutex>
@@ -25,6 +25,7 @@
 extern "C" GakuStatus GakuActors_CameraCoreQuery(uint32_t,uint32_t,GakuPluginDescriptor*);
 #endif
 
+#include "MotionAssetPanel.hpp"
 namespace GakuActors {
 struct State {
     GakuHostApi host{};GakuLogService log{};GakuRuntimeService runtime{};
@@ -36,15 +37,23 @@ struct State {
     std::string legacyThumbnailId,legacyThumbnailData,legacyThumbnailStatus,legacyHeadData,legacyHeadStatus;
     uint64_t legacyThumbnailRevision{};
     std::mutex mutex;std::deque<Command> commands;
-    std::atomic<bool> ready{},stopped{};bool catalogRead{},catalogRequested{},sceneRequested{},wasAdmitted{},diagnostics{};
+    std::atomic<uint64_t> motionAssetRequest{};
+    uint64_t motionAssetStarted{},motionAssetCaptured{};
+    Json motionAssetOwner,motionAssetSession;
+    std::chrono::steady_clock::time_point nextMotionAssetPoll{},motionAssetReadyAt{};
+    Json motionAssetSnapshot;
+    std::string motionAssetScene;
+    std::atomic<bool> ready{},stopped{};bool sceneRequested{},wasAdmitted{},diagnostics{};
     SceneGate gate;
     int livePauseScene{},livePauseOwner{};bool ownsLivePause{};std::chrono::steady_clock::time_point nextLivePauseObserve{};
-    CatalogStartupRead catalogStartup;bool catalogManualRequest{};
+    CatalogStartupRead catalogStartup;
+    bool catalogEnrichmentPending{},liveResourceScanned{};
+    int previewScene{};
     int resourceScene{},stageChoice{};bool stageAttempted{};std::string resourceActiveScene;
     std::vector<Preset> modelQueue;size_t modelCursor{},modelFailures{};
-    bool dialogOpen{false},preLiveDialogOpen{false},preLiveCatalogAttempted{false},preLiveLogged{false},preLiveResourceScan{false},desktopResourceScan{false};
+    bool dialogOpen{false},preLiveDialogOpen{false},preLiveLogged{false},desktopResourceScan{false};
     std::atomic<uint64_t> preLiveUiSeenMs{},desktopUiSeenMs{};
-    std::chrono::steady_clock::time_point nextScan{},nextCatalog{};
+    std::chrono::steady_clock::time_point nextScan{};
     std::chrono::steady_clock::time_point nextPreLiveProbe{},lastPreLiveSlowLog{},nextPreLiveModelMonitor{};
     std::string lastPreLiveModelLog;
     struct Playback {uint32_t abiVersion,structSize;uint32_t(*isPlaying)();} playback{};
@@ -85,7 +94,7 @@ static std::string DesktopMessage(State& s,const std::string& request) {
         if(!payload.is_object()||!payload.contains("version")||payload["version"]!=desktop_protocol::kVersion||
            !payload.contains("action")||!payload["action"].is_string())return {};
         s.desktopUiSeenMs.store(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()),std::memory_order_release);
-        UiSnapshot snapshot;std::string thumbnailId,thumbnailData,thumbnailStatus,thumbnailHeadData,thumbnailHeadStatus;
+        UiSnapshot snapshot;Json motionAssets;std::string thumbnailId,thumbnailData,thumbnailStatus,thumbnailHeadData,thumbnailHeadStatus;
         const bool thumbnailRequest=payload["action"]=="thumbnail_status";
         bool accepted=payload["action"]=="snapshot"||thumbnailRequest;
         {
@@ -98,9 +107,11 @@ static std::string DesktopMessage(State& s,const std::string& request) {
                 }
             }
             snapshot=s.snapshot;
+            if(snapshot.inLive&&snapshot.activeSceneName==s.motionAssetScene&&s.motionAssetCaptured==s.motionAssetRequest.load())motionAssets=s.motionAssetSnapshot;
             if(thumbnailRequest){thumbnailId=s.thumbnailId;thumbnailData=s.thumbnailData;thumbnailStatus=s.thumbnailStatus;thumbnailHeadData=s.thumbnailHeadData;thumbnailHeadStatus=s.thumbnailHeadStatus;}
         }
         Json result{{"version",desktop_protocol::kVersion},{"accepted",accepted},{"snapshot",desktop_protocol::Snapshot(snapshot)}};
+        if(motionAssets.is_object())result["snapshot"]["motion_assets"]=std::move(motionAssets);
         if(thumbnailRequest)result["thumbnail"]={{"id",thumbnailId},{"status",thumbnailStatus},{"data",thumbnailData},{"head_status",thumbnailHeadStatus},{"head_data",thumbnailHeadData}};
         return result.dump();
     } catch(...) {return {};}
@@ -174,8 +185,7 @@ static void RuntimeReadyImpl(void* context) {
     }
 #endif
     const bool ready=s.native.Resolve(s.runtime.getGameAssembly());s.ready.store(ready,std::memory_order_release);
-    s.catalogStartup={};s.catalogRead=false;
-    Log(s,ready?"IL2CPP exports resolved; catalog auto-read queued for the first settled Photography/Live scene":"IL2CPP exports unavailable",ready?GAKU_LOG_INFO:GAKU_LOG_WARNING);
+    Log(s,ready?"IL2CPP exports resolved; catalog available on desktop connection":"IL2CPP exports unavailable",ready?GAKU_LOG_INFO:GAKU_LOG_WARNING);
 }
 static uint64_t MonotonicMs(){return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
 static void ActorTickImpl(void* context,void* actor,float) {
@@ -233,7 +243,7 @@ static void TickImpl(void* context,float) {
         }
         const std::string activeScene=next.admitted?s.native.ActiveSceneName():std::string{};
         if(next.admitted&&!s.gate.MatchesActive(activeScene)){s.gate.Reset();next.admitted=false;}
-        next.activeSceneName=next.admitted?activeScene:std::string{};
+        if(next.admitted||!s.previewScene)next.activeSceneName=next.admitted?activeScene:std::string{};
         next.inLive=next.admitted&&s.gate.Mode()==PerformanceMode::Live;
         if(!next.inLive){next.liveModels.clear();next.preLiveModelStatus.clear();}
         s.freeCamera.Scene(next.admitted);
@@ -249,7 +259,12 @@ static void TickImpl(void* context,float) {
                 if(s.cameraHandoffRequested&&s.cameraHandoff.request)s.cameraHandoff.request(0);s.cameraHandoffRequested=false;
                 Log(s,"Free camera stopped on scene change");
             }
+            ++s.motionAssetRequest;
+            s.liveResourceScanned=false;s.previewScene=0;next.resourceStatus.clear();
             if(s.resourceScene)s.native.EndResourceSession();s.resourceScene=currentScene;s.resourceActiveScene=next.admitted?activeScene:std::string{};next.resources.clear();next.resourceControls=false;next.cameraColorEnabled=false;
+        }
+        if(s.previewScene&&s.native.ActiveSceneHandle()!=s.previewScene){
+            s.previewScene=0;next.resources.clear();next.activeSceneName.clear();next.resourceStatus.clear();
         }
         s.native.SetAdmittedScene(currentScene);
         if(!next.inLive||s.livePauseScene!=currentScene){s.ownsLivePause=false;s.livePauseOwner=0;s.livePauseScene=currentScene;next.livePauseAvailable=false;next.livePaused=false;next.livePauseOwned=false;s.nextLivePauseObserve={};}
@@ -266,13 +281,13 @@ static void TickImpl(void* context,float) {
             next.preLiveModelStatus.clear();
             if(s.cameraHandoffRequested&&s.cameraHandoff.request)s.cameraHandoff.request(0);
             s.cameraHandoffRequested=false;s.freeCameraPending=false;
-            s.catalogRequested=false;s.catalogManualRequest=false;s.sceneRequested=false;s.modelQueue.clear();s.modelCursor=0;next.actors.clear();next.playing=false;
+            s.sceneRequested=false;next.actors.clear();next.playing=false;
             s.resourceEnablePending=false;next.resourceEnablePending=false;s.poseChecks.clear();
-            if(s.wasAdmitted){const bool resumeDesktop=s.desktopResourceScan;s.native.SuspendScene();s.preLiveResourceScan=false;s.desktopResourceScan=false;if(resumeDesktop)s.desktopResourceScan=s.native.StartResourceScan(next.catalog,true);Log(s,"Performance scene left; catalog/roster scanning suspended");}
+            if(s.wasAdmitted){s.native.SuspendScene(s.desktopResourceScan);Log(s,"Performance scene left; scene roster scanning suspended");}
             s.wasAdmitted=false;
             s.stageAttempted=false;
         } else {
-            if(!s.wasAdmitted){Log(s,"Performance scene admitted; automatic catalog read will run when settled");s.native.notice=s.catalogRead?"场景已就绪，人物目录已读取":"场景已就绪，正在准备自动读取人物目录";}
+            if(!s.wasAdmitted){s.sceneRequested=true;s.nextScan={};s.native.notice="场景已就绪";}
             s.wasAdmitted=true;
             if(!s.playback.isPlaying)Query(s,"gakumotion.playback-state",s.playback);
             next.playing=s.playback.isPlaying&&s.playback.isPlaying();
@@ -307,6 +322,7 @@ static void TickImpl(void* context,float) {
             } else if(s.resourceEnablePending&&(!motionDetected||next.motionHandoffReleased)) {
                 try {
                     next.resources=s.native.ScanResources();
+                    if(next.inLive)s.liveResourceScanned=true;
                     s.resourceEnablePending=false;next.resourceEnablePending=false;next.resourceControls=true;
                     s.sceneRequested=true;s.nextScan={};
                     next.resourceStatus="资源控制已启用；Motion 交接完成";Log(s,"Resource control enabled after Motion handoff");
@@ -338,51 +354,72 @@ static void TickImpl(void* context,float) {
             const auto after=next.preLiveStatus+"|"+next.preLiveCharacter+"|"+next.preLiveBody+"|"+next.preLiveHead;
             if(!verbose&&(before!=after||previousCostumes!=next.preLiveCostumes))Log(s,"PreLive observation changed: uptime_ms="+std::to_string(MonotonicMs())+" "+after+" confirmed_count="+std::to_string(next.preLiveCostumes.size()));
         };
+        auto readCatalog=[&](bool manual) {
+            if(s.native.Busy()){next.preLiveCatalogStatus="游戏资源操作进行中，请稍后读取目录";return;}
+            s.catalogStartup.Begin();
+            ++next.preLiveCatalogRevision;
+            try {
+                if(!s.native.Ready())throw std::runtime_error("游戏运行时尚未就绪，请稍后手动更新");
+                // Read Master data only. Optional descriptor factories and
+                // scene enumeration remain restricted to admitted scenes.
+                auto catalog=s.native.ScanCatalog(false);
+                if(catalog.characters.empty()||catalog.bodies.empty()||catalog.heads.empty())throw std::runtime_error("游戏人物或服装数据尚未就绪，请稍后手动更新");
+                for(const auto& resource:next.catalog.resources)AddModelResource(catalog,resource);
+                for(const auto& model:next.catalog.models)catalog.models.push_back(model);
+                // Preserve previously verified special characters and
+                // factory presets without invoking factories outside scenes.
+                for(const auto& c:next.catalog.characters)if(c.special&&!FindCharacter(catalog,c.id))catalog.characters.push_back(c);
+                for(const auto& p:next.catalog.defaults)if(!p.factory.empty())catalog.defaults.push_back(p);
+                catalog.revision=next.catalog.revision+1;next.catalog=std::move(catalog);
+                next.preLiveCatalogStatus=manual?"人物目录已重新读取":"人物目录已自动读取";
+                s.catalogEnrichmentPending=std::none_of(next.catalog.defaults.begin(),next.catalog.defaults.end(),[](const auto& p){return !p.factory.empty();});
+                s.modelQueue.clear();s.modelCursor=0;s.modelFailures=0;
+                for(const auto& p:next.catalog.defaults)if(p.factory.empty()&&std::none_of(next.catalog.models.begin(),next.catalog.models.end(),[&](const auto& model){return model.costumeId==p.body&&model.headId==p.head;}))s.modelQueue.push_back(p);
+                // Read-only bounded Octo index; independent of photo/Live.
+                // No bundles are loaded and no actor is instantiated.
+                s.desktopResourceScan=s.native.StartResourceScan(next.catalog,true);
+            } catch(const std::exception& e){next.preLiveCatalogStatus=std::string("目录读取失败：")+e.what();Log(s,next.preLiveCatalogStatus,GAKU_LOG_WARNING);}
+        };
+        auto scanSceneResources=[&]{
+            if(next.inLive)++s.motionAssetRequest;
+            try{
+                if(!s.native.Ready())throw std::runtime_error("游戏运行时尚未就绪");
+                if(!next.admitted){
+                    s.previewScene=s.native.ActiveSceneHandle();
+                    if(!s.previewScene)throw std::runtime_error("当前场景尚未就绪");
+                    next.activeSceneName=s.native.ActiveSceneName();
+                }
+                next.resources=s.native.ScanResources(!next.admitted);
+                next.resourceStatus="已扫描 "+next.activeSceneName+" · "+std::to_string(next.resources.size())+" 项"+(next.admitted?"":" · 只读");
+            }catch(const std::exception& e){
+                next.resources.clear();next.resourceStatus=std::string("场景扫描失败：")+e.what();
+                Log(s,next.resourceStatus,GAKU_LOG_WARNING);
+            }
+        };
         for(const auto& command:commands) {
             switch(command.action) {
-            case Action::Scan:if(next.admitted){s.catalogRequested=true;s.catalogManualRequest=true;s.sceneRequested=true;}break;
+            case Action::Scan:
+                if(next.admitted&&s.diagnostics){
+                    try{s.native.DiagnoseContracts();s.native.DiagnoseActorManagerRelations();s.native.DiagnoseLiveBindings();s.native.DiagnoseActors();}
+                    catch(const std::exception& e){Log(s,std::string("Catalog diagnostics unavailable: ")+e.what(),GAKU_LOG_WARNING);}
+                }
+                readCatalog(true);
+                [[fallthrough]];
+            case Action::ScanScene:
+                if(next.admitted){s.sceneRequested=true;s.nextScan={};}
+                break;
             case Action::InspectPreLive: {
                 inspectPreLive(true);s.nextPreLiveProbe=now+std::chrono::milliseconds(500);
                 break;
             }
-            case Action::ReadDesktopCatalog: {
-                ++next.preLiveCatalogRevision;
-                try {
-                    if(!s.native.Ready())throw std::runtime_error("游戏运行时尚未就绪，请稍后手动更新");
-                    // Runtime metadata can be ready before the game's master database.
-                    // A desktop connection alone is not evidence that it is safe to read.
-                    if(!MayReadDesktopCatalog(next.admitted,next.preLiveDetected))throw std::runtime_error("等待进入拍摄、Live 或已确认的入场前页面；当前显示缓存目录");
-                    if(s.native.Busy())throw std::runtime_error("游戏资源操作进行中，请稍后手动更新");
-                    // Read Master data only. Optional descriptor factories and
-                    // scene enumeration remain restricted to admitted scenes.
-                    auto catalog=s.native.ScanCatalog(false);
-                    if(catalog.characters.empty()||catalog.bodies.empty()||catalog.heads.empty())throw std::runtime_error("游戏人物或服装数据尚未就绪，请稍后手动更新");
-                    for(const auto& resource:next.catalog.resources)AddModelResource(catalog,resource);
-                    for(const auto& model:next.catalog.models)catalog.models.push_back(model);
-                    // Preserve previously verified special characters and
-                    // factory presets without invoking factories outside scenes.
-                    for(const auto& c:next.catalog.characters)if(c.special&&!FindCharacter(catalog,c.id))catalog.characters.push_back(c);
-                    for(const auto& p:next.catalog.defaults)if(!p.factory.empty())catalog.defaults.push_back(p);
-                    catalog.revision=next.catalog.revision+1;next.catalog=std::move(catalog);
-                    next.preLiveCatalogStatus="人物、服装和头部目录已读取";
-                    // Read-only bounded Octo index; independent of photo/Live.
-                    // No bundles are loaded and no actor is instantiated.
-                    s.preLiveResourceScan=false;s.desktopResourceScan=s.native.StartResourceScan(next.catalog,true);
-                } catch(const std::exception& e){next.preLiveCatalogStatus=std::string("目录读取失败：")+e.what();Log(s,next.preLiveCatalogStatus,GAKU_LOG_WARNING);}
-                break;
-            }
+            case Action::ReadDesktopCatalog:
+                readCatalog(true);break;
             case Action::ReadPreLiveCharacters: {
                 if(next.admitted){next.preLiveCatalogStatus="请先回到 Live 入场前的播放确认页";break;}
                 try {
                     const auto observed=s.native.InspectPreLiveSelection(false);
                     if(!observed.found){next.preLiveCatalogStatus="请先打开 Live 现场播放确认页";break;}
-                    auto catalog=s.native.ScanCatalog();
-                    if(catalog.characters.empty()){next.preLiveCatalogStatus="游戏没有返回人物目录，请稍后重试";break;}
-                    for(const auto& resource:next.catalog.resources)AddModelResource(catalog,resource);
-                    catalog.revision=next.catalog.revision+1;next.catalog=std::move(catalog);
-                    next.preLiveCatalogStatus="人物和服装目录已读取，可手动选择人物分类";
-                    s.desktopResourceScan=false;s.preLiveResourceScan=s.native.StartResourceScan(next.catalog,true);
-                    Log(s,"PreLive catalog loaded: characters="+std::to_string(next.catalog.characters.size())+" bodies="+std::to_string(next.catalog.bodies.size())+" heads="+std::to_string(next.catalog.heads.size()));
+                    readCatalog(true);
                 } catch(const std::exception& e) {next.preLiveCatalogStatus=std::string("人物和服装目录读取失败：")+e.what();Log(s,next.preLiveCatalogStatus,GAKU_LOG_WARNING);}
                 break;
             }
@@ -533,7 +570,8 @@ static void TickImpl(void* context,float) {
                     {command.preset.bodyAsset,command.preset.faceAsset,command.preset.hairAsset},command.action==Action::RestoreActorModel);
                 s.nextScan={};break;
             case Action::ScanResources:
-                if(next.admitted){next.resources=s.native.ScanResources();s.sceneRequested=true;s.nextScan={};next.resourceStatus="已扫描当前场景；勾选可隐藏资源";}
+                if(!s.native.Busy()){if(next.inLive)s.liveResourceScanned=true;scanSceneResources();}
+                else next.resourceStatus="游戏资源操作进行中，请稍后扫描";
                 break;
             case Action::HideResource:
                 if(next.admitted&&next.resourceControls&&!next.motionConflict) {
@@ -553,7 +591,7 @@ static void TickImpl(void* context,float) {
                         next.resourceStatus="正在等待 Motion 释放资源，完成后自动启用";Log(s,"Resource enable requested: waiting for Motion handoff");
                     } else {
                         try {
-                            next.resources=s.native.ScanResources();next.resourceControls=true;s.sceneRequested=true;s.nextScan={};
+                            next.resources=s.native.ScanResources();if(next.inLive)s.liveResourceScanned=true;next.resourceControls=true;s.sceneRequested=true;s.nextScan={};
                             next.resourceStatus="资源控制已启用";Log(s,"Resource control enabled");
                         } catch(const std::exception& e) {
                             next.resourceControls=false;next.resourceStatus=std::string("资源扫描失败，未启用控制：")+e.what();
@@ -626,17 +664,9 @@ static void TickImpl(void* context,float) {
             const bool slow=elapsed>std::chrono::milliseconds(50);
             s.nextPreLiveProbe=std::chrono::steady_clock::now()+(slow?std::chrono::milliseconds(2000):std::chrono::milliseconds(500));
             if(slow&&now-s.lastPreLiveSlowLog>std::chrono::seconds(10)){s.lastPreLiveSlowLog=now;Log(s,"PreLive observation exceeded 50 ms; reduced polling frequency",GAKU_LOG_WARNING);}
-            if(!next.preLiveDetected){s.preLiveCatalogAttempted=false;s.preLiveLogged=false;}
+            if(!next.preLiveDetected){s.preLiveLogged=false;}
             else if(!s.preLiveLogged){s.preLiveLogged=true;inspectPreLive(true);}
-            else if(!s.preLiveCatalogAttempted) {
-                s.preLiveCatalogAttempted=true;
-                if(next.catalog.bodies.empty()&&next.catalog.heads.empty()) {
-                    std::lock_guard<std::mutex> lock(s.mutex);
-                    if(s.commands.size()<128)QueueCommand(s,Command{Action::ReadPreLiveCharacters});
-                } else if(!s.native.ResourceScanActive()&&next.catalog.resourceNotice.find("底层资源目录完成")==std::string::npos) {
-                    s.desktopResourceScan=false;s.preLiveResourceScan=s.native.StartResourceScan(next.catalog,true);
-                }
-            }
+
         }
         if(next.admitted&&next.preLiveDetected){next.preLiveDetected=false;next.preLiveCharacter.clear();next.preLiveBody.clear();next.preLiveHead.clear();next.preLiveCostumes.clear();next.preLiveStatus="已进入演出，入场前观察已停止";}
         s.preLiveHook.DrainSkip();if(next.admitted&&s.gate.Mode()==PerformanceMode::Live)s.preLiveHook.SceneEntered();
@@ -672,30 +702,15 @@ static void TickImpl(void* context,float) {
         }
         s.native.PollSpawn(); // Only our own pending task; no cache or catalog load.
         s.native.PollModelEdit();
-        const auto catalogNow=MonotonicMs();
-        const bool catalogDue=s.catalogStartup.Due(next.admitted,s.native.Busy(),catalogNow);
-        if(!s.catalogRead&&!s.catalogRequested&&catalogDue){
-            s.catalogStartup.Begin(catalogNow);s.catalogRequested=true;s.catalogManualRequest=false;s.sceneRequested=true;
+        if(s.catalogStartup.Due(observingDesktop||s.dialogOpen||next.admitted,s.native.Busy(),tickMs))readCatalog(false);
+        if(next.inLive&&!s.liveResourceScanned&&!s.native.Busy()){
+            s.liveResourceScanned=true;
+            scanSceneResources();
         }
-        if(next.admitted&&s.catalogRequested&&!s.native.Busy()) {
-            s.catalogRequested=false;
-            const bool manual=s.catalogManualRequest;s.catalogManualRequest=false;
-            // Expensive diagnostics remain an explicit action. Automatic reads
-            // use the same catalog path without probing live actor contracts.
-            if(manual&&s.diagnostics){
-                try{s.native.DiagnoseContracts();}catch(const std::exception& e){Log(s,std::string("Diagnostic contracts unavailable: ")+e.what(),GAKU_LOG_WARNING);}
-                try{s.native.DiagnoseActorManagerRelations();}catch(const std::exception& e){Log(s,std::string("Diagnostic manager relationships unavailable: ")+e.what(),GAKU_LOG_WARNING);}
-                try{s.native.DiagnoseLiveBindings();}catch(const std::exception& e){Log(s,std::string("Diagnostic live bindings unavailable: ")+e.what(),GAKU_LOG_WARNING);}
-                try{s.native.DiagnoseActors();}catch(const std::exception& e){Log(s,std::string("Diagnostic actors unavailable: ")+e.what(),GAKU_LOG_WARNING);}
-            }
-            Log(s,manual?"Catalog request BEGIN (manual refresh)":"Catalog request BEGIN (automatic startup read)");
-            try{auto catalog=s.native.ScanCatalog();if(catalog.characters.empty())throw std::runtime_error("游戏尚未返回人物目录");catalog.revision=next.catalog.revision+1;next.catalog=std::move(catalog);s.catalogRead=true;s.catalogStartup.Complete();s.native.notice=manual?"人物目录已重新读取":"人物目录已自动读取，可选择人物与预设";Log(s,"Game master catalog read: "+std::to_string(next.catalog.characters.size())+" characters, "+std::to_string(next.catalog.bodies.size())+" bodies, "+std::to_string(next.catalog.heads.size())+" heads");
-                s.desktopResourceScan=false;s.preLiveResourceScan=false;s.native.StartResourceScan(next.catalog);
-                s.modelQueue.clear();s.modelCursor=0;s.modelFailures=0;
-                for(const auto& p:next.catalog.defaults)if(p.factory.empty())s.modelQueue.push_back(p);
-            }
-            catch(const std::exception& e){next.catalog.notice=std::string("目录读取未完成：")+e.what();s.native.notice=next.catalog.notice+(s.catalogStartup.Pending()?"；将稍后自动重试":"；可点击重新读取目录重试");Log(s,s.native.notice,GAKU_LOG_WARNING);}
-            Log(s,"Catalog request END");
+        if(next.admitted&&s.catalogEnrichmentPending&&!s.native.Busy()){
+            s.catalogEnrichmentPending=false;
+            s.native.AddSpecialCatalogEntries(next.catalog);
+            ++next.catalog.revision;
         }
         if(next.admitted&&s.modelCursor<s.modelQueue.size()) {
             // Resolve definitions, not assets, at most one outfit per frame.
@@ -706,25 +721,52 @@ static void TickImpl(void* context,float) {
             next.catalog.notice="目录已读取；模型资源解析 "+std::to_string(s.modelCursor)+"/"+std::to_string(s.modelQueue.size())+"；资源定义不代表已加载人物";
             if(s.modelCursor==s.modelQueue.size())Log(s,"Model definitions complete: resolved="+std::to_string(next.catalog.models.size())+" skipped="+std::to_string(s.modelFailures));
         }
-        if(s.preLiveResourceScan&&(!next.preLiveDetected||!ShouldObservePreLive(next.admitted,preLiveUi,tickMs))){
-            s.native.StopResourceScan();s.preLiveResourceScan=false;
-            next.catalog.resourceNotice="离开确认页，模型目录扫描已暂停";
+        // Persist the final Octo result once its bounded scan completes.
+        if(s.desktopResourceScan&&s.native.ResourceScanActive()&&!s.native.Busy()){
+            s.native.StepResourceScan(next.catalog,true);
+            if(!s.native.ResourceScanActive()){
+                s.desktopResourceScan=false;
+                if(next.catalog.resourceNotice.find("底层资源目录完成")==0)++next.catalog.revision;
+            }
         }
-        // Completion changes the revision once so the desktop can persist the
-        // final verified resource list. During the scan snapshots still expose
-        // incremental results and progress without repeated cache writes.
-        auto stepCatalogResources=[&](bool outside) {
-            const bool wasActive=s.native.ResourceScanActive();
-            if(wasActive&&!s.native.Busy())s.native.StepResourceScan(next.catalog,outside);
-            if(wasActive&&!s.native.ResourceScanActive()&&next.catalog.resourceNotice.find("底层资源目录完成")==0)++next.catalog.revision;
-        };
-        if(s.desktopResourceScan) {stepCatalogResources(true);if(!s.native.ResourceScanActive())s.desktopResourceScan=false;}
-        else if(s.preLiveResourceScan){stepCatalogResources(true);if(!s.native.ResourceScanActive())s.preLiveResourceScan=false;}
-        else if(next.admitted)stepCatalogResources(false);
         if(next.admitted&&s.sceneRequested&&now>=s.nextScan){next.actors=s.native.ScanScene();s.nextScan=now+std::chrono::milliseconds(500);}
     } catch(const std::exception& e){s.native.notice=e.what();Log(s,e.what(),GAKU_LOG_WARNING);}
     s.native.EndFrame();
     publish();
+}
+static void RefreshMotionAssetsFromDesktop(State& s,const UiSnapshot& snapshot) {
+    const auto request=s.motionAssetRequest.load();
+    if(!snapshot.inLive||!request)return;
+    const auto now=std::chrono::steady_clock::now();
+    if(now<s.nextMotionAssetPoll)return;
+    s.nextMotionAssetPoll=now+std::chrono::milliseconds(500);
+    {std::lock_guard<std::mutex> lock(s.mutex);if(s.motionAssetCaptured==request)return;}
+    MotionWebPanel panel;
+    if(!s.host.queryService||!Query(s,"gakumotion.web-panel/v1",panel)||!panel.handleMessage)return;
+    const auto fork=MotionWebRequest(panel,"fork.get");
+    if(!fork.is_object()||!fork.value("viewing",false)||!fork.contains("session")||!fork.contains("owner"))return;
+    if(s.motionAssetStarted!=request||s.motionAssetOwner!=fork["owner"]||s.motionAssetSession!=fork["session"]) {
+        const auto props=MotionWebRequest(panel,"fork.command",{{"action","stage.propsScan"},{"session",fork["session"]},{"owner",fork["owner"]}});
+        const auto stage=MotionWebRequest(panel,"stage.scan");
+        if(!props.is_object()||!stage.is_object())return;
+        s.motionAssetStarted=request;s.motionAssetOwner=fork["owner"];s.motionAssetSession=fork["session"];
+        s.motionAssetReadyAt=now+std::chrono::milliseconds(1000);
+        return;
+    }
+    if(now<s.motionAssetReadyAt||fork.value("propsScanning",false)||!fork.contains("props")||!fork["props"].is_array())return;
+    const auto motion=MotionWebRequest(panel,"state.get");
+    if(!motion.is_object()||!motion.contains("stage")||!motion["stage"].is_object()||
+        !motion.contains("stageNodes")||!motion["stageNodes"].is_array())return;
+    // Motion identifies the presenter's owning scene, Actors displays the
+    // active Unity scene (which can be an additive Live environment).
+    const auto motionScene=motion["stage"].value("sceneName",std::string{});
+    if(motionScene!="Live"&&motionScene!=snapshot.activeSceneName)return;
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if(s.snapshot.inLive&&s.snapshot.activeSceneName==snapshot.activeSceneName&&s.motionAssetRequest.load()==request){
+        s.motionAssetSnapshot={{"nodes",motion["stageNodes"]},{"props",fork["props"]}};
+        s.motionAssetScene=snapshot.activeSceneName;
+        s.motionAssetCaptured=request;
+    }
 }
 static void DesktopImpl(void* context) {
     auto& s=*static_cast<State*>(context);if(s.stopped||!s.desktop.bind)return;
@@ -738,6 +780,7 @@ static void DesktopImpl(void* context) {
     UiSnapshot snapshot;std::string legacyId,legacyBody,legacyBodyStatus,legacyHead,legacyHeadStatus;uint64_t legacyRevision{};
     {std::lock_guard<std::mutex> lock(s.mutex);snapshot=s.snapshot;legacyRevision=s.legacyThumbnailRevision;
         if(legacyRevision!=s.ui.ThumbnailRevision()){legacyId=s.legacyThumbnailId;legacyBody=s.legacyThumbnailData;legacyBodyStatus=s.legacyThumbnailStatus;legacyHead=s.legacyHeadData;legacyHeadStatus=s.legacyHeadStatus;}}
+    RefreshMotionAssetsFromDesktop(s,snapshot);
     if(legacyRevision!=s.ui.ThumbnailRevision())s.ui.SetThumbnail(legacyRevision,legacyId,legacyBody,legacyBodyStatus,legacyHead,legacyHeadStatus);
     // Render the embedded tools in the loader panel.
     ImGui::TextUnformatted("GakuActors · 场景资源管理");

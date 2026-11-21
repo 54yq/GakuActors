@@ -1,5 +1,5 @@
 // Test the actual plugin frame pump with runtime-ready=true and deliberately
-// absent IL2CPP pointers. Automatic reads must wait for actual scene admission.
+// absent IL2CPP pointers. Automatic reads wait for desktop connection or scene admission.
 #include "Plugin.cpp"
 #include <cassert>
 #include <iostream>
@@ -37,10 +37,10 @@ int main() {
         DesktopSessionDisconnected(session,used);assert(session.commands.size()==2);
     }
     State s;s.ready=true;
-    assert(!s.dialogOpen&&!s.catalogRequested&&!s.sceneRequested);
+    assert(!s.dialogOpen&&s.catalogStartup.Pending()&&!s.sceneRequested);
     for(int i=0;i<120;++i)TickImpl(&s,1.0f/60.0f);
-    assert(!s.snapshot.admitted&&!s.sceneRequested&&!s.catalogRead);
-    assert(s.catalogStartup.Pending()&&s.catalogStartup.Attempts()==0);
+    assert(!s.snapshot.admitted&&!s.sceneRequested&&s.catalogStartup.Pending());
+    assert(s.snapshot.catalogAutoPending);
     assert(s.snapshot.actors.empty()&&s.snapshot.catalog.characters.empty());
     // The pre-Live page may be opened outside a performance scene; a missing
     // runtime must fail closed without dereferencing any game API pointers.
@@ -48,19 +48,25 @@ int main() {
     assert(!s.snapshot.preLiveDetected&&s.snapshot.preLiveStatus=="游戏运行时尚未就绪");
     auto reply=Json::parse(DesktopMessage(s,R"({"version":1,"action":"snapshot"})"));
     assert(reply["accepted"]==true&&reply["snapshot"]["admitted"]==false);
-    // A desktop request reaches the real frame pump outside a scene but must
-    // fail closed when the confirmed page/runtime is unavailable.
+    // A settled desktop connection attempts the catalog outside Live once.
+    // The runtime is unavailable in this fixture, so a retry must be explicit.
+    assert(!s.catalogStartup.Due(true,false,MonotonicMs()-1000));
+    TickImpl(&s,.016f);
+    assert(s.snapshot.preLiveCatalogRevision==1&&!s.snapshot.admitted);
+    assert(!s.catalogStartup.Pending()&&!s.snapshot.catalogAutoPending);
+    TickImpl(&s,.016f);assert(s.snapshot.preLiveCatalogRevision==1);
     reply=Json::parse(DesktopMessage(s,R"({"version":1,"action":"read_pre_live_catalog"})"));
     assert(reply["accepted"]==true&&s.commands.size()==1);
     TickImpl(&s,.016f);
-    assert(s.snapshot.preLiveCatalogRevision==1&&!s.snapshot.admitted);
+    assert(s.snapshot.preLiveCatalogRevision==2&&!s.snapshot.admitted);
     assert(s.snapshot.preLiveCatalogStatus.find("游戏运行时尚未就绪")!=std::string::npos);
-    assert(s.snapshot.catalog.characters.empty()&&s.snapshot.resources.empty()&&!s.preLiveResourceScan);
+    assert(s.snapshot.catalog.characters.empty()&&s.snapshot.resources.empty()&&!s.desktopResourceScan);
     reply=Json::parse(DesktopMessage(s,R"({"version":1,"action":"scan_resources"})"));
     assert(reply["accepted"]==true&&s.commands.size()==1);
     reply=Json::parse(DesktopMessage(s,R"({"version":1,"action":"unknown"})"));
     assert(reply["accepted"]==false&&s.commands.size()==1);
     TickImpl(&s,.016f);assert(!s.snapshot.admitted&&s.snapshot.resources.empty());
+    assert(s.snapshot.resourceStatus.find("场景扫描失败")!=std::string::npos);
     s.commands.push_back({Action::Scan});
     s.commands.push_back({Action::ScanResources});
     s.commands.push_back({Action::EnableResourceControls,{},1});
@@ -68,11 +74,9 @@ int main() {
     s.commands.push_back({Action::CameraColor});
     s.commands.push_back({Action::SelectStage,{},1});
     s.commands.push_back({Action::EnableCreation,{},1}); // unsupported pages cannot enable loading
-    s.modelQueue.push_back(Preset{"id","queued","hski","body","head"});
     TickImpl(&s,.016f);
-    assert(!s.catalogRequested&&!s.sceneRequested&&!s.snapshot.admitted);
+    assert(!s.sceneRequested&&!s.snapshot.admitted);
     assert(!s.snapshot.resourceControls&&s.snapshot.resources.empty());
-    assert(s.modelQueue.empty()); // no deferred model resolution leaks into startup
     s.commands.push_back({Action::Spawn,Preset{"id","test","hski","body","head"},1});
     TickImpl(&s,.016f);
     assert(!s.snapshot.mutationsEnabled);
@@ -87,5 +91,5 @@ int main() {
     assert(!s.snapshot.admitted&&!s.native.MutationsEnabled());
     s.native.SuspendScene();s.native.Shutdown();
     assert(s.native.PerformanceScene()==0&&!s.snapshot.mutationsEnabled);
-    std::cout<<"Actual plugin startup pump: automatic catalog waits for admission; 120 idle frames and lifecycle passed\n";
+    std::cout<<"Actual plugin startup pump: catalog waits for a desktop connection or admission; 120 idle frames and lifecycle passed\n";
 }

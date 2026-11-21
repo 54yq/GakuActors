@@ -1,6 +1,6 @@
 use std::{env,path::PathBuf,process::Command};
 fn main() {
-    println!("cargo:rustc-env=SLINT_STYLE=fluent-light");
+    println!("cargo:rustc-env=SLINT_STYLE=fluent-dark");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=app-icon.rc");
     println!("cargo:rerun-if-changed=../GakuActors.ico");

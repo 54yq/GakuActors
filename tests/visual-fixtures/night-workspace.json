@@ -1,0 +1,43 @@
+{
+  "characters": [
+    {"id":"amao","name":"有村麻央"},
+    {"id":"hski","name":"花海咲季"},
+    {"id":"fktn","name":"藤田琴音"},
+    {"id":"ttmr","name":"月村手毬"},
+    {"id":"hume","name":"花海佑芽"}
+  ],
+  "bodies": [
+    {"id":"costume-demo-a","name":"练习服","character":"amao"},
+    {"id":"costume-demo-b","name":"初始演出服","character":"amao"}
+  ],
+  "heads": [
+    {"id":"head-demo-a","name":"基本造型","character":"amao"},
+    {"id":"head-demo-b","name":"舞台造型","character":"amao"}
+  ],
+  "presets": [
+    {"id":"preset-demo-a","character":"amao","name":"初始演出服","body":"costume-demo-b","head":"head-demo-a","builtin":true},
+    {"id":"preset-demo-b","character":"amao","name":"练习造型","body":"costume-demo-a","head":"head-demo-a"},
+    {"id":"preset-demo-c","character":"amao","name":"舞台造型","body":"costume-demo-b","head":"head-demo-b"}
+  ],
+  "actors": [
+    {"scene":10,"instance":100,"name":"藤田琴音","bodyAsset":"初始演出服","faceAsset":"默认","hairAsset":"默认","pose_supported":true,"position":[0,0,1.25],"yaw":0},
+    {"scene":10,"instance":101,"name":"花海咲季","position":[-1.7,0,0.65],"pose_supported":true,"yaw":0},
+    {"scene":10,"instance":102,"name":"月村手毬","position":[1.7,0,0.65],"owned":true,"pose_supported":true,"yaw":0}
+  ],
+  "scene_resources": [
+    {"kind":4,"scene":10,"instance":1,"name":"舞台主体","generation":1,"locked":true,"active":true},
+    {"kind":4,"scene":10,"instance":2,"parent":1,"name":"舞台边框","generation":1,"active":true},
+    {"kind":2,"scene":10,"instance":3,"name":"背景飘带","generation":1,"active":true},
+    {"kind":3,"scene":10,"instance":4,"name":"舞台主灯","generation":1,"active":true},
+    {"kind":3,"scene":10,"instance":5,"name":"默认后处理","generation":1,"hidden":true,"active":false},
+    {"kind":1,"scene":10,"instance":6,"name":"手持麦克风","generation":1,"active":true},
+    {"kind":4,"scene":10,"instance":6,"name":"Prop_Microphone","generation":1,"active":true},
+    {"kind":4,"scene":10,"instance":7,"parent":6,"name":"麦克风主体","generation":1,"locked":true,"active":true},
+    {"kind":4,"scene":10,"instance":8,"parent":6,"name":"麦克风装饰","generation":1,"locked":true,"active":true},
+    {"kind":1,"scene":10,"instance":9,"name":"移动箱","generation":1,"active":true},
+    {"kind":4,"scene":10,"instance":9,"name":"Prop_Hknesuitcase","generation":1,"active":true},
+    {"kind":4,"scene":10,"instance":11,"parent":9,"name":"箱体","generation":1,"locked":true,"active":true},
+    {"kind":4,"scene":10,"instance":12,"parent":9,"name":"发光层","generation":1,"locked":true,"active":true},
+    {"kind":4,"scene":10,"instance":13,"parent":9,"name":"箱体面板","generation":1,"locked":true,"active":true}
+  ]
+}

@@ -27,10 +27,6 @@ pub fn save_volume(volume:u32)->Result<(),String> {
     if volume>100{return Err("音量超出范围".into());}
     save_setting("preview_volume",volume.into())
 }
-pub fn load_theme()->i32 {
-    config_path().ok().and_then(|p|std::fs::read(p).ok()).and_then(|b|serde_json::from_slice::<serde_json::Value>(&b).ok()).and_then(|v|v["library_theme"].as_i64()).filter(|v|(0..=2).contains(v)).unwrap_or(0) as i32
-}
-pub fn save_theme(theme:i32)->Result<(),String>{if !(0..=2).contains(&theme){return Err("主题设置无效".into());}save_setting("library_theme",theme.into())}
 fn save_setting(key:&str,value:serde_json::Value)->Result<(),String>{
     let path=config_path()?;let parent=path.parent().ok_or("配置目录无效")?;
     std::fs::create_dir_all(parent).map_err(|e|format!("无法保存音量：{e}"))?;
