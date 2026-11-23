@@ -15,7 +15,7 @@ struct UiSnapshot {
     Catalog catalog;std::vector<Preset> presets;std::vector<SceneActor> actors;
     bool catalogAutoPending{true};
     std::vector<SceneResource> resources;std::string resourceStatus;
-    int stageChoice{};std::string stageStatus;
+    bool stageAvailable{};int stageChoice{};std::string stageStatus;
     std::string notice,storeNotice,activeSceneName;bool writable{},busy{},playing{},runtime{};
     uint64_t poseResetRevision{};int poseResetActor{};float poseResetPosition[3]{};
     uint64_t poseResetYawRevision{};int poseResetYawActor{};float poseResetYaw{};

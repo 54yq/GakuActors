@@ -53,12 +53,18 @@ std::vector<ActorIdentity> CaptureActors() {
     for(void* a:Objects(Class("Campus.Common","CampusActorController")))result.push_back(Identify(a));
     return result;
 }
-void* AtIndex(void* manager,int index) {
+bool ActorIndexOccupied(void* manager,int index) {
     void* args[]{&index};
     const auto contains=Method(objectClass_(manager),"ContainsActor",1,false,{8});
     if(!contains||typeCode_(result_(contains))!=2)throw std::runtime_error("索引占用检查接口不匹配");
     Pin present(*this,Call(contains,manager,args));
-    if(!present.Get()||!*static_cast<bool*>(unbox_(present.Get())))return nullptr;
+    const auto* value=present.Get()?static_cast<const bool*>(unbox_(present.Get())):nullptr;
+    if(!value)throw std::runtime_error("无法读取人物索引占用状态");
+    return *value;
+}
+void* AtIndex(void* manager,int index) {
+    if(!ActorIndexOccupied(manager,index))return nullptr;
+    void* args[]{&index};
     return Call(Method(objectClass_(manager),"GetActor",1,false,{8}),manager,args);
 }
 void SetPose(void* actor,const float* position,const float* rotation) {
@@ -133,7 +139,7 @@ bool StartSpawn(const Preset& p,int reference) {
     if(Busy()){notice="正在加载人物，请勿重复提交";return false;}
     std::string error;if(!ValidatePreset(p,error)){notice=error;return false;}
     const int scene=PerformanceScene();if(!scene){notice="请进入拍摄或 Live";return false;}
-    if(owned_.size()>=8){notice="实验版最多保留 8 个独立人物记录";return false;}
+    if(owned_.size()>=MaxOwnedActors){notice="实验版最多保留 "+std::to_string(MaxOwnedActors)+" 个独立人物记录";return false;}
     if(!fieldValue_||!fields_||!fieldType_){notice="当前版本缺少安全读取构建结果所需的字段接口";return false;}
     void* primary=FindActor(reference,scene);if(!primary||!Bool(GameObject(primary),"get_activeInHierarchy")||!Bool(primary,"get_IsBuildSuccess")){notice="参考主角色尚未就绪";return false;}
     void* manager=Manager();if(!manager){notice="无法唯一确认人物管理器";return false;}
@@ -148,6 +154,14 @@ bool StartSpawn(const Preset& p,int reference) {
     void* tupleClass=getResult?fromType_(result_(getResult)):nullptr;
     if(!getAwaiter||!completed||typeCode_(result_(completed))!=2||!IsBuildTuple(tupleClass)){notice="完整构建任务的返回契约不匹配，未创建人物";return false;}
     const auto baseline=CaptureActors();
+    Pin indexBox(*this,Call(allocate,manager));
+    const auto* preferred=indexBox.Get()?static_cast<const int*>(unbox_(indexBox.Get())):nullptr;
+    const int index=SelectActorIndex(preferred?*preferred:-1,[&](int candidate){
+        return std::any_of(baseline.begin(),baseline.end(),[&](const auto& actor){return actor.index==candidate;})||
+            ActorIndexOccupied(manager,candidate);
+    });
+    if(!BaselinePreserved(baseline,CaptureActors())){Fault("索引分配后既有角色状态变化，未执行创建");return false;}
+    if(index<0){notice="未找到空闲人物索引，请移除一位独立人物后重试";return false;}
     Pin settings(*this,Call(On(primary,"get_settings"),primary)),descriptor(*this,Descriptor(p));
     if(!settings.Get()||!descriptor.Get()||!assignable_(fromType_(param_(build,0)),objectClass_(settings.Get()))||!assignable_(fromType_(param_(build,1)),objectClass_(descriptor.Get()))){notice="原生构建设置或描述类型不兼容";return false;}
     const auto setId=Method(objectClass_(descriptor.Get()),"set_uniqueId",1,false,{0x0e});
@@ -159,13 +173,14 @@ bool StartSpawn(const Preset& p,int reference) {
         if(existing.Get()&&existing.Get()==descriptor.Get()){Fault("描述工厂返回既有角色共享对象，拒绝修改身份");return false;}
     }
     Pending next;next.active=true;next.started=std::chrono::steady_clock::now();next.resultClass=tupleClass;next.displayName=p.name;
-    next.lease.manager=Int(manager,"GetInstanceID");next.lease.identity.scene=scene;next.lease.preset=p.id;
+    next.lease.manager=Int(manager,"GetInstanceID");next.lease.identity.scene=scene;next.lease.identity.index=index;next.lease.preset=p.id;
     static uint64_t serial{};next.lease.identity.unique="gakuactors-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(++serial);
     Pin id(*this,stringNew_(next.lease.identity.unique.c_str()));void* idArgs[]{id.Get()};Call(setId,descriptor.Get(),idArgs);
     next.requested={p.character,Text(descriptor.Get(),"get_body"),Text(descriptor.Get(),"get_face"),Text(descriptor.Get(),"get_hair"),p.factory};
     if(next.requested.body.empty()||next.requested.face.empty()||next.requested.hair.empty()){notice="原生描述的身体、脸或头发资源为空";return false;}
     next.baseline=baseline;for(const auto& a:next.baseline)next.lease.preexisting.push_back(a.instance);
     if(!BaselinePreserved(next.baseline,CaptureActors())){Fault("准备模型描述时既有角色状态变化，未创建人物");return false;}
+    if(ActorIndexOccupied(manager,index)){notice="选定的人物索引已被占用，请重新加入";return false;}
     Pose(primary,next.position,next.rotation);
     void* sourceClass=Class("System.Threading","CancellationTokenSource");Pin source(*this,sourceClass?objectNew_(sourceClass):nullptr);
     if(!source.Get())throw std::runtime_error("取消源分配失败");Call(On(source.Get(),".ctor"),source.Get());
@@ -175,12 +190,8 @@ bool StartSpawn(const Preset& p,int reference) {
     next.cancellation=newHandle_(source.Get(),false);if(!next.cancellation)throw std::runtime_error("取消源保留失败");
     pending_=std::move(next);
     try {
-        Pin indexBox(*this,Call(allocate,manager));if(!indexBox.Get())throw std::runtime_error("独立索引为空");
-        int index=*static_cast<int*>(unbox_(indexBox.Get()));pending_.lease.identity.index=index;
-        if(AtIndex(manager,index))throw std::runtime_error("原生分配的索引仍被占用，已拒绝创建");
-        if(!BaselinePreserved(pending_.baseline,CaptureActors()))throw std::runtime_error("索引分配后既有角色状态变化，未执行创建");
         Trace(("Spawn isolated BEGIN: index="+std::to_string(index)+" scene="+std::to_string(scene)+" baseline="+std::to_string(pending_.baseline.size())+" body="+pending_.requested.body+" face="+pending_.requested.face+" hair="+pending_.requested.hair).c_str());
-        void* args[]{&index,&pending_.lease.identity.scene};Pin actor(*this,Call(create,manager,args));
+        void* args[]{&pending_.lease.identity.index,&pending_.lease.identity.scene};Pin actor(*this,Call(create,manager,args));
         void* expected=Class("Campus.Common","CampusActorController");
         if(!actor.Get()||!expected||!assignable_(expected,objectClass_(actor.Get())))throw std::runtime_error("创建结果不是原生人物控制器");
         ActorIdentity identity;identity.instance=Int(actor.Get(),"GetInstanceID");identity.index=Int(actor.Get(),"get_index");identity.scene=SceneOf(GameObject(actor.Get()));

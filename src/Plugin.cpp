@@ -10,7 +10,6 @@
 #include "SceneGate.hpp"
 #include "StageLoadHook.hpp"
 #include "PreLiveLoadHook.hpp"
-#include "StageChoiceStore.hpp"
 #include "DesktopProtocol.hpp"
 #include "DesktopListener.hpp"
 #include "FreeCamera.hpp"
@@ -30,7 +29,7 @@ namespace GakuActors {
 struct State {
     GakuHostApi host{};GakuLogService log{};GakuRuntimeService runtime{};
     GakuDesktopUiService desktop{};GakuDesktopWindowService window{};GakuHotkeyService hotkeys{};
-    GakuHookService hooks{};GakuMainThreadService mainThread{};StageLoadHook stageHook;PreLiveLoadHook preLiveHook;StageChoiceStore stageStore;
+    GakuHookService hooks{};GakuMainThreadService mainThread{};StageLoadHook stageHook;PreLiveLoadHook preLiveHook;
     GakuPathsV1 paths{};NativeApi native;PresetStore store;ActorUi ui;UiSnapshot snapshot;FreeCamera freeCamera;
     DesktopListener desktopListener;
     std::string thumbnailId,thumbnailData,thumbnailStatus,thumbnailHeadData,thumbnailHeadStatus;
@@ -49,7 +48,7 @@ struct State {
     CatalogStartupRead catalogStartup;
     bool catalogEnrichmentPending{},liveResourceScanned{};
     int previewScene{};
-    int resourceScene{},stageChoice{};bool stageAttempted{};std::string resourceActiveScene;
+    int resourceScene{};uint64_t photoPreparationSeen{},nextPhotoObservation{},photoHandoffDeadline{};bool photoHandoff{};int pendingPhotoChoice{};std::string resourceActiveScene;
     std::vector<Preset> modelQueue;size_t modelCursor{},modelFailures{};
     bool dialogOpen{false},preLiveDialogOpen{false},preLiveLogged{false},desktopResourceScan{false};
     std::atomic<uint64_t> preLiveUiSeenMs{},desktopUiSeenMs{};
@@ -156,9 +155,7 @@ static GakuStatus ActivateImpl(const GakuHostApi* host,void** output) {
     s.preLiveHook.Configure(&s.native,s.hooks,s.mainThread);
     s.freeCamera.Configure(&s.native,s.hooks,s.mainThread);
     s.native.trace=s.diagnostics?+[](const char* text){Log(state,text);}:nullptr;
-    const auto root=ConfigRoot(s);if(!root.empty()){s.store.SetFile(root/L"actor_presets.json");s.stageStore.SetFile(root/L"stage_choice.json");}
-    if(!s.stageStore.Load(s.stageChoice))s.snapshot.stageStatus="摄影背景设置不可读或损坏，已保留原文件";
-    s.snapshot.stageChoice=s.stageChoice;
+    const auto root=ConfigRoot(s);if(!root.empty())s.store.SetFile(root/L"actor_presets.json");
     s.store.Load();s.snapshot.writable=s.store.Writable();s.snapshot.presets=s.store.presets;s.snapshot.storeNotice=s.store.notice;
     if(s.hotkeys.registerHotkey) {
         const GakuHotkeyBinding key{1,sizeof(key),"show-actors","场景人物管理",'J',GAKU_HOTKEY_MOD_CTRL,Show,nullptr};
@@ -285,7 +282,6 @@ static void TickImpl(void* context,float) {
             s.resourceEnablePending=false;next.resourceEnablePending=false;s.poseChecks.clear();
             if(s.wasAdmitted){s.native.SuspendScene(s.desktopResourceScan);Log(s,"Performance scene left; scene roster scanning suspended");}
             s.wasAdmitted=false;
-            s.stageAttempted=false;
         } else {
             if(!s.wasAdmitted){s.sceneRequested=true;s.nextScan={};s.native.notice="场景已就绪";}
             s.wasAdmitted=true;
@@ -339,9 +335,61 @@ static void TickImpl(void* context,float) {
                 if(cameraRestored&&resourcesRestored){next.resourceControls=false;next.cameraColorEnabled=false;next.resources.clear();}
                 next.resourceStatus=cameraRestored&&resourcesRestored?"检测到动作插件，已恢复并停用资源显隐":"检测到动作插件，但资源恢复未完成；已停止新的显隐操作";
             }
-            if(!s.stageAttempted&&s.stageChoice&&s.gate.Mode()==PerformanceMode::Photography){
-                s.stageAttempted=true;next.stageStatus=s.stageHook.Select(s.stageChoice)?"已启用摄影背景载入替换；等待下一次载入":"摄影背景替换不可用：接口缺失或载入钩子已被其他插件占用";
+        }
+        const auto photoNow=MonotonicMs();
+        bool photoPreparationCancelled=false;
+        const bool observePhoto=!next.admitted&&(observingDesktop||s.dialogOpen||next.stageChoice||s.pendingPhotoChoice);
+        const bool selectingPhoto=std::any_of(commands.begin(),commands.end(),[](const Command& command){return command.action==Action::SelectStage;});
+        if(!observePhoto)next.stageAvailable=false;
+        else if(selectingPhoto||photoNow>=s.nextPhotoObservation){
+            s.nextPhotoObservation=photoNow+250;
+            next.stageAvailable=false;
+            try {
+                next.stageAvailable=s.native.PhotoPreparationActive();
+                photoPreparationCancelled=next.stageChoice&&!next.stageAvailable&&
+                    s.native.ActivePhotoObject("Campus.OutGame","PhotographyPrepareTopScreenView");
+            }catch(const std::exception&){}
+        }
+        if(next.stageAvailable)s.photoPreparationSeen=photoNow;
+        auto releasePhotoHandoff=[&]{
+            if(s.photoHandoff&&!s.handoffRequested&&s.handoff.request)s.handoff.request(0);
+            s.photoHandoff=false;
+        };
+        auto selectPhotoStage=[&](int choice){
+            if(!s.stageHook.Select(choice)){
+                next.stageStatus="无法设置摄影舞台：游戏接口不可用或载入钩子已被占用";
+                if(!next.stageChoice)releasePhotoHandoff();
+                return;
             }
+            next.stageChoice=choice;
+            if(!choice){s.gate.ClearPhotoExpectation();releasePhotoHandoff();}
+            next.stageStatus=choice?"已选择舞台，进入本次摄影时生效":"本次摄影使用游戏原生背景";
+        };
+        if(s.pendingPhotoChoice){
+            if(!next.stageAvailable){
+                s.pendingPhotoChoice=0;
+                releasePhotoHandoff();
+                next.stageStatus="摄影准备页已关闭，舞台选择已取消";
+            } else if(s.handoff.isReleased&&s.handoff.isReleased()){
+                const int choice=s.pendingPhotoChoice;
+                s.pendingPhotoChoice=0;
+                selectPhotoStage(choice);
+            } else if(photoNow>=s.photoHandoffDeadline){
+                s.pendingPhotoChoice=0;
+                releasePhotoHandoff();
+                next.stageStatus="等待 Motion 交接超时，本次摄影使用游戏原生背景";
+            }
+        }
+        const bool photoStageLoaded=next.admitted&&s.gate.Mode()==PerformanceMode::Photography&&activeScene.rfind("env_3d_",0)==0;
+        const bool photoSelectionExpired=!next.stageAvailable&&photoNow-s.photoPreparationSeen>10000;
+        if(s.photoHandoff&&!s.pendingPhotoChoice&&!next.stageChoice&&s.stageHook.Select(0))releasePhotoHandoff();
+        if(next.stageChoice&&(photoStageLoaded||s.gate.Mode()==PerformanceMode::Live||photoPreparationCancelled||photoSelectionExpired)){
+            const bool applied=s.stageHook.Applied();
+            s.stageHook.Disarm();
+            if(s.stageHook.Select(0))releasePhotoHandoff();
+            s.gate.ClearPhotoExpectation();
+            next.stageStatus=applied&&photoStageLoaded&&activeScene==StageLoadHook::Key(next.stageChoice)?"本次摄影已使用选定舞台":"本次摄影舞台选择已清除";
+            next.stageChoice=0;
         }
         auto inspectPreLive=[&](bool verbose) {
             const auto before=next.preLiveStatus+"|"+next.preLiveCharacter+"|"+next.preLiveBody+"|"+next.preLiveHead;
@@ -614,13 +662,27 @@ static void TickImpl(void* context,float) {
                 }
                 break;
             case Action::SelectStage:
-                if(next.admitted&&s.gate.Mode()==PerformanceMode::Photography) {
-                    const int old=s.stageChoice;
-                    if(!s.stageHook.Select(command.instance)){next.stageStatus="无法设置：游戏接口不可用或载入钩子被其他插件占用";break;}
-                    if(!s.stageStore.Save(command.instance)){s.stageHook.Select(old);next.stageStatus="无法保存摄影背景设置，原设置已保留";break;}
-                    s.stageChoice=command.instance;next.stageChoice=s.stageChoice;s.stageAttempted=true;
-                    next.stageStatus=s.stageChoice?"选择已保存；下次摄影背景载入时生效":"已选择游戏原生背景；下次摄影背景载入时生效";
-                } else next.stageStatus="请先进入摄影场景再修改摄影背景";
+                if(!next.stageAvailable){
+                    next.stageStatus="请在游戏中打开摄影准备页后选择舞台";
+                    break;
+                }
+                if(!StageLoadHook::Key(command.instance))break;
+                if(!command.instance){
+                    s.pendingPhotoChoice=0;
+                    selectPhotoStage(0);
+                    break;
+                }
+                if(!s.handoff.request||!s.handoff.isReleased)Query(s,"gakumotion.visual-handoff",s.handoff);
+                if(s.handoff.request&&s.handoff.isReleased&&!s.handoff.isReleased()){
+                    if(!s.handoff.request(1)){
+                        next.stageStatus="Motion 未接受摄影舞台交接";
+                        break;
+                    }
+                    s.pendingPhotoChoice=command.instance;
+                    s.photoHandoffDeadline=photoNow+15000;
+                    s.photoHandoff=true;
+                    next.stageStatus="正在等待 Motion 交接摄影舞台";
+                } else selectPhotoStage(command.instance);
                 break;
             case Action::LoadThumbnail: {
                 std::string data,status="没有可确认的服装图",headData,headStatus="没有可确认的头部组合图";
@@ -817,6 +879,7 @@ static void ShutdownImpl(void* context) {
     if(s.cameraHandoffRequested&&s.cameraHandoff.request)s.cameraHandoff.request(0);
     s.desktopListener.Stop();
     s.stageHook.Shutdown();
+    if(s.photoHandoff&&s.handoff.request)s.handoff.request(0);
     s.preLiveHook.Shutdown();
     if(s.hotkeys.unregisterHotkey)s.hotkeys.unregisterHotkey(s.hotkeys.context,"show-actors");
     try{s.native.Shutdown();}catch(...){}
@@ -854,7 +917,7 @@ static void Shutdown(void* context) noexcept {
 extern "C" GAKU_PLUGIN_EXPORT GakuStatus GakuPlugin_Query(uint32_t version,uint32_t bytes,GakuPluginDescriptor* output) {
     if(version!=GAKU_ABI_VERSION)return GAKU_E_VERSION;
     if(!output)return GAKU_E_INVALID_ARGUMENT;if(bytes<sizeof(*output))return GAKU_E_SIZE;
-    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景资源管理","0.5.7",
+    *output={1,sizeof(*output),"gakuactors","GakuActors · 场景资源管理","0.5.10",
         GakuActors::Activate,GakuActors::RuntimeReady,GakuActors::Tick,GakuActors::ActorTick,GakuActors::Desktop,GakuActors::Shutdown};
     return GAKU_OK;
 }

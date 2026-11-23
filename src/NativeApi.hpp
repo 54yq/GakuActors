@@ -353,6 +353,33 @@ public:
         }
         return output;
     }
+    int ActivePhotoObject(const char* ns,const char* name,bool photographyScene=false) {
+        if(!Ready())return 0;
+        void* klass=Class(ns,name);
+        void* component=Class("UnityEngine","Component");
+        if(!klass||!component||!assignable_(component,klass))return 0;
+        int instance=0;
+        for(void* object:Objects(klass)) {
+            void* go=GameObject(object);
+            if(!go||!Bool(go,"get_activeInHierarchy")||!SceneOf(go))continue;
+            if(photographyScene&&ObserveActorScene(object).owner!="Photography")continue;
+            if(instance)return 0;
+            instance=Int(object,"GetInstanceID");
+        }
+        return instance;
+    }
+    bool PhotoPreparationActive() {
+        for(const char* type:{"PhotographyPrepareStageSelectScreenView","PhotographyPrepareModelListScreenView"})
+            if(ActivePhotoObject("Campus.OutGame",type))return true;
+        return false;
+    }
+    bool PhotoSceneLoading() {
+        if(!Ready())return false;
+        const auto active=ActiveSceneName();
+        return active=="Photography"||
+            (ActivePhotoObject("Campus.Photography","Photography3DPresenter",true)&&
+             active.rfind("env_3d_",0)!=0);
+    }
     void EndFrame(){for(void* h:frameRoots_)freeHandle_(h);frameRoots_.clear();}
     void* GameObject(void* component){return Call(On(component,"get_gameObject"),component);}
     int SceneOf(void* go) {

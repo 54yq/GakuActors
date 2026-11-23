@@ -1,6 +1,6 @@
 [package]
 name = "gakuactors-desktop"
-version = "0.5.7"
+version = "0.5.10"
 edition = "2021"
 publish = false
 autobins = false

@@ -8,7 +8,7 @@ enum class PerformanceMode { None, Photography, Live };
 // name or the mere presence of a loaded model. No game calls live in this policy.
 class SceneGate {
     PerformanceMode mode_{PerformanceMode::None};
-    int scene_{};uint64_t observed_{};int replacementOwner_{};std::string replacement_;
+    int scene_{};uint64_t observed_{};int replacementOwner_{};std::string replacement_,expectedPhoto_;
     static bool PhotoActive(const std::string& n) {
         // Same admitted photography environments as the local MMD baseline.
         return n=="Photography"||n=="env_3d_photo_hotspring-00-00-night"||
@@ -29,6 +29,9 @@ public:
             mode_==PerformanceMode::Live&&(active=="Live"||active.rfind("env_3d_live_",0)==0);
     }
     void Observe(const std::string& owner,int scene,const std::string& active,uint64_t now) {
+        if(owner=="Photography"&&scene&&!expectedPhoto_.empty()&&active==expectedPhoto_){
+            replacementOwner_=scene;replacement_=active;expectedPhoto_.clear();
+        }
         auto found=Recognize(owner,active);
         if(found==PerformanceMode::None&&owner=="Photography"&&scene==replacementOwner_&&!replacement_.empty()&&active==replacement_)found=PerformanceMode::Photography;
         if(found!=PerformanceMode::None&&scene){mode_=found;scene_=scene;observed_=now;}
@@ -40,6 +43,8 @@ public:
         if(mode_!=PerformanceMode::Photography||!scene||scene!=scene_||target.empty())return false;
         replacementOwner_=scene;replacement_=target;return true;
     }
+    void ExpectPhotoReplacement(const std::string& target){expectedPhoto_=target;}
+    void ClearPhotoExpectation(){expectedPhoto_.clear();}
     int Scene()const{return scene_;}
     PerformanceMode Mode()const{return mode_;}
 };

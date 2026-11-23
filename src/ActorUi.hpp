@@ -196,14 +196,14 @@ public:
         if(!props) {
             const char* stages[]{"游戏原生摄影场景","通用 Live 舞台（实验）","初星舞台（实验）","中庭舞台（日中）"};
             ImGui::SetNextItemWidth(-1);
-            ImGui::BeginDisabled(!s.admitted);
-            if(ImGui::BeginCombo("下次摄影背景",stages[(s.stageChoice>=0&&s.stageChoice<4)?s.stageChoice:0])) {
+            ImGui::BeginDisabled(!s.stageAvailable);
+            if(ImGui::BeginCombo("本次摄影舞台",stages[(s.stageChoice>=0&&s.stageChoice<4)?s.stageChoice:0])) {
                 for(int i=0;i<4;++i)if(ImGui::Selectable(stages[i],s.stageChoice==i))commands.push_back({Action::SelectStage,{},i});
                 ImGui::EndCombo();
             }
             ImGui::EndDisabled();
             if(!s.stageStatus.empty())ImGui::TextWrapped("%s",s.stageStatus.c_str());
-            ImGui::TextDisabled("选择后在下一次摄影背景载入时生效，非立即替换。");
+            ImGui::TextDisabled("请在摄影准备页选舞台，进入本次摄影时生效。");
             bool solid=s.cameraColorEnabled;ImGui::BeginDisabled(!s.resourceControls);
             if(ImGui::Checkbox("相机纯色背景",&solid)) {
                 Command c{Action::CameraColor};c.hidden=solid;std::memcpy(c.color,s.cameraColor,sizeof(c.color));commands.push_back(c);

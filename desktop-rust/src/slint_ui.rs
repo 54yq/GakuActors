@@ -21,12 +21,13 @@ component Button inherits Rectangle {
 }
 // Decorative arrow has no input handler: clicks still reach the native ComboBox.
 component ThemeComboBox inherits Rectangle {
+    in property <bool> enabled: true;
     in property <[string]> model;
     in-out property <int> current-index: 0;
     callback selected(string);
     height:34px; min-width:0px; vertical-stretch:0; background:transparent;
     ComboBox { x:0px; y:0px; width:parent.width; height:parent.height;
-        model:root.model; current-index <=> root.current-index;
+        enabled:root.enabled; model:root.model; current-index <=> root.current-index;
         selected(value) => { root.selected(value); }
     }
     Rectangle { x:parent.width - 38px; y:2px; width:36px; height:parent.height - 4px;
@@ -277,6 +278,8 @@ export component Manager inherits Window {
     in property <[string]> references; in property <[string]> raw-bodies; in property <[string]> raw-faces; in property <[string]> raw-hairs;
     in-out property <int> reference-index: -1; in-out property <int> body-index: -1; in-out property <int> face-index: -1; in-out property <int> hair-index: -1;
     in-out property <int> stage-index: 0;
+    in property <bool> stage-available;
+    in property <string> stage-status;
     in-out property <string> red-value: "0"; in-out property <string> green-value: "1"; in-out property <string> blue-value: "0";
     in property <string> preset-pager; in property <string> body-pager; in property <string> head-pager;
     in property <string> body-placeholder: "暂无图片"; in property <string> head-placeholder: "暂无图片";
@@ -290,7 +293,7 @@ export component Manager inherits Window {
     in property <bool> library-can-plan; in property <bool> library-can-submit; in property <bool> library-can-cancel; in property <bool> library-can-retry; in property <bool> library-can-open;
     in property <[Entry]> library-resources; in property <[Entry]> library-jobs; in property <[Entry]> library-selected;
     callback library-action(string, string); callback library-change();
-    callback action(string, string); callback changed(string); callback drag-position(string, float);
+    callback action(string, string); callback stage-selected(int); callback changed(string); callback drag-position(string, float);
     property <int> brand-taps:0;
     out property <bool> libraries-unlocked:root.brand-taps>=10;
     out property <string> unlock-hint:root.brand-taps>=5 && root.brand-taps<10 ?
@@ -367,7 +370,7 @@ export component Manager inherits Window {
             VerticalLayout { padding-left:root.gutter; padding-right:root.gutter; padding-top:root.short-window ? 16px : 22px; padding-bottom:root.short-window ? 10px : 16px; spacing:root.short-window ? 10px : 16px;
                 PageHeading {
                     title:root.page==4 ? "人物预设编辑" : root.page==0 ? "人物与预设" : root.page==1 ? "场景人物" : root.page==5 ? "舞台导入" : "场景与道具";
-                    subtitle:root.page==1 || root.page==2 ? root.scene-summary : root.page==5 ? "设置下次载入摄影背景时使用的舞台。" : root.page==4 ? "选择部件，预览并保存造型。" :
+                    subtitle:root.page==1 || root.page==2 ? root.scene-summary : root.page==5 ? "为本次摄影选择舞台。" : root.page==4 ? "选择部件，预览并保存造型。" :
                         root.admitted ? "选择人物与造型预设，可将造型加入当前场景。" : root.characters.length==0 ? "读取人物目录后即可浏览人物并管理造型预设。" : "可浏览本地人物目录。加入场景需进入拍摄或 Live。";
                     if root.page==0: Button { cross-axis-self-alignment:center; text:"读取人物目录"; enabled:root.can-scan-catalog; clicked=>{root.action("scan","");} }
                     if (root.page==0 || root.page==1) && root.admitted: Button { text:root.creation ? "关闭人物加载" : "启用人物加载"; enabled:root.ready; clicked=>{root.action("creation","");} }
@@ -663,9 +666,9 @@ export component Manager inherits Window {
             }
             if root.page==5: HorizontalLayout { vertical-stretch:0; height:166px; spacing:ActorsTheme.workspace-gap; Panel { width:Math.min(620px, root.width - root.nav-width - 2*root.gutter); VerticalLayout {padding:16px;spacing:10px;alignment:start;
                 Caption {text:"摄影背景";}
-                Note {text:"摄影背景舞台将在下次背景载入时应用。";}
-                ThemeComboBox {height:40px;min-width:0px;model:["游戏原生摄影场景","通用 Live 舞台（实验）","初星舞台（实验）","中庭舞台（日中）"];current-index <=> root.stage-index;}
-                HorizontalLayout { alignment:start; Button {text:"应用到下次背景载入";primary:true;enabled:root.ready;clicked=>{root.action("stage","");}} }
+                Note {text:root.stage-available ? "选择舞台后，进入本次摄影时生效。" : "请先在游戏中打开摄影准备页。";}
+                stage-picker := ThemeComboBox {height:40px;min-width:0px;model:["游戏原生摄影场景","通用 Live 舞台（实验）","初星舞台（实验）","中庭舞台（日中）"];enabled:root.stage-available;current-index:root.stage-index;selected(value)=>{root.stage-selected(stage-picker.current-index);}}
+                Note {text:root.stage-status;}
             } } Rectangle { horizontal-stretch:1; } }
             if root.page==2: Note {text:root.workspace-feedback!="" ? root.workspace-feedback : "扫描范围为当前场景。显隐控制需场景授权。";}
             if root.page!=2 && root.notice!="": Rectangle { height:root.short-window ? 28px : 40px; vertical-stretch:0; background:ActorsTheme.inset; border-radius:6px;

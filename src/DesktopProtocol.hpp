@@ -28,7 +28,7 @@ inline Json Snapshot(const UiSnapshot& s) {
         {"creation_enabled",s.mutationsEnabled},{"resource_enabled",s.resourceControls},{"resource_enable_pending",s.resourceEnablePending},
         {"motion_conflict",s.motionConflict},{"motion_handoff_available",s.motionHandoffAvailable},{"motion_handoff_requested",s.motionHandoffRequested},{"motion_handoff_released",s.motionHandoffReleased},{"camera_enabled",s.cameraColorEnabled},
         {"camera_color",{s.cameraColor[0],s.cameraColor[1],s.cameraColor[2],s.cameraColor[3]}},
-        {"stage_choice",s.stageChoice},{"characters",Json::array()},{"presets",Json::array()},
+        {"stage_available",s.stageAvailable},{"stage_choice",s.stageChoice},{"characters",Json::array()},{"presets",Json::array()},
         {"bodies",Json::array()},{"heads",Json::array()},{"resources",Json::array()},
         {"models",Json::array()},{"actors",Json::array()},{"scene_resources",Json::array()},{"live_models",Json::array()}};
     for(const auto& c:PreLiveCharacterChoices(s.catalog,s.presets))out["characters"].push_back({{"id",c.id},{"name",c.name},{"special",c.special}});

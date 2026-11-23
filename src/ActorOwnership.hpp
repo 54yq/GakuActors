@@ -3,6 +3,16 @@
 #include <string>
 #include <vector>
 namespace GakuActors {
+inline constexpr int MaxOwnedActors=64;
+
+template<class IsOccupied>
+int SelectActorIndex(int preferred,IsOccupied isOccupied) {
+    if(preferred>=0&&!isOccupied(preferred))return preferred;
+    for(int index=0;index<=2*MaxOwnedActors;++index)
+        if(index!=preferred&&!isOccupied(index))return index;
+    return -1;
+}
+
 struct ActorIdentity {
     int instance{},index{},scene{};
     std::string unique;

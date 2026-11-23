@@ -3,7 +3,6 @@
 #include "NativeApi.hpp"
 #include <GakuPlugin.h>
 #include <atomic>
-#include <chrono>
 
 namespace GakuActors {
 // Load-time asset-name seam. The game's load task and cancellation are not
@@ -16,17 +15,18 @@ class StageLoadHook {
     NativeApi* native_{};SceneGate* gate_{};
     Original original_{};const void* method_{};void* target_{};
     std::atomic<int> choice_{0};std::atomic<bool> enabled_{false};
-    static uint64_t Clock() {return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
+    bool applied_{};
     static void* Detour(void* background,int time,const void* method) noexcept {
         StageLoadHook* self=current_;if(!self||!self->original_)return nullptr;
         void* result=self->original_(background,time,method);
         try {
             if(!self->enabled_.load(std::memory_order_acquire)||!self->main_.isMainThread||!self->main_.isMainThread(self->main_.context)||
-               (method&&method!=self->method_)||!self->gate_||!self->gate_->Fresh(Clock())||self->gate_->Mode()!=PerformanceMode::Photography)return result;
+               (method&&method!=self->method_)||!self->gate_||!self->native_->PhotoSceneLoading())return result;
             const char* target=Key(self->choice_.load(std::memory_order_acquire));if(!target||!target[0])return result;
             const auto before=self->native_->String(result);if(before.rfind("env_3d_",0)!=0)return result;
             void* changed=before==target?result:self->native_->NewManagedString(target);if(!changed)return result;
-            if(!self->gate_->AuthorizeReplacement(self->gate_->Scene(),target))return result;
+            self->gate_->ExpectPhotoReplacement(target);
+            self->applied_=true;
             return changed;
         } catch(...) {return result;}
     }
@@ -47,7 +47,7 @@ public:
             }
             target_=nullptr;choice_.store(0,std::memory_order_release);return true;
         }
-        if(!native_||!gate_||!gate_->Fresh(Clock())||gate_->Mode()!=PerformanceMode::Photography||
+        if(!native_||!gate_||
            !hooks_.acquireBatch||!hooks_.release||!main_.isMainThread||!main_.isMainThread(main_.context))return false;
         if(!enabled_.load(std::memory_order_acquire)) {
             method_=native_->PhotoBackgroundMethod();if(!method_)return false;
@@ -58,8 +58,10 @@ public:
             if(status!=GAKU_OK||!original_){if(target_&&hooks_.release(hooks_.context,target_)==GAKU_OK)target_=nullptr;return false;}
             enabled_.store(true,std::memory_order_release);
         }
-        choice_.store(choice,std::memory_order_release);return true;
+        applied_=false;choice_.store(choice,std::memory_order_release);return true;
     }
+    bool Applied() const {return applied_;}
+    void Disarm(){choice_.store(0,std::memory_order_release);applied_=false;}
     void Shutdown() {
         choice_.store(0,std::memory_order_release);enabled_.store(false,std::memory_order_release);
         if(target_&&hooks_.release&&hooks_.release(hooks_.context,target_)==GAKU_OK)target_=nullptr;

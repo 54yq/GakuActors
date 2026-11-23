@@ -231,7 +231,7 @@ struct State {
     snapshot:Value,tx:Option<mpsc::SyncSender<Work>>,connected:bool,connection_detail:String,character:String,preset:String,actor:String,resource:String,
     body:String,head:String,edit_id:String,raw:[Vec<String>;3],cache:HashMap<String,Pictures>,lru:VecDeque<String>,requested:HashSet<String>,
     tree_rows:Vec<scene_tree::TreeRow>,collapsed:HashSet<String>,notes:BTreeMap<String,String>,notes_path:Option<std::path::PathBuf>,notes_error:bool,yaw_dirty:bool,
-    pages:[usize;3],catalog_scan:bool,game_configured:bool,reference:i64,stage_initialized:bool,confirm:Option<Value>,undo:Option<Value>,save:Option<(Value,Instant)>,message:String,pose_dirty:bool,reset:Option<(i64,u64)>,reset_yaw:Option<(i64,u64)>,
+    pages:[usize;3],catalog_scan:bool,game_configured:bool,reference:i64,confirm:Option<Value>,undo:Option<Value>,save:Option<(Value,Instant)>,message:String,pose_dirty:bool,reset:Option<(i64,u64)>,reset_yaw:Option<(i64,u64)>,
 }
 impl State {
     fn send(&mut self,mut v:Value){if !self.connected&&!matches!(v["action"].as_str(),Some("save_preset"|"delete_preset")){return;}v["version"]=1.into();if let Some(tx)=&self.tx {if tx.try_send(Work::Command(v)).is_err(){self.message="操作队列忙，请稍后重试。".into();}}else{self.message="游戏插件未连接。".into();}}
@@ -279,7 +279,7 @@ impl State {
             ui.set_preset_pager(self.pager(presets.len(),0).into());
             if let Some(p)=current {let req=json!({"version":1,"action":"load_thumbnail","preset_id":self.preset});let k=image_key(&self.snapshot,&format!("preset:{}",self.preset),&req);self.request(k.clone(),req);pictures=self.cache.get(&k).cloned().unwrap_or_default();ui.set_selection(s(&p,"name").into());let detail=if !s(&p,"bodyAsset").is_empty(){format!("身体：{}\n脸部：{}\n头发：{}",s(&p,"bodyAsset"),s(&p,"faceAsset"),s(&p,"hairAsset"))}else if !s(&p,"factory").is_empty(){format!("人物模型：{}",s(&p,"name"))}else{format!("身体：{}\n头部：{}",s(&p,"body"),s(&p,"head"))};ui.set_detail(detail.into());ui.set_can_delete(!flag(&p,"builtin")&&flag(&self.snapshot,"writable"));}
         }
-        let actors=rows(&self.snapshot,"actors");ui.set_references(strings(actors.iter().map(|v|format!("与 {} 同位置",s(v,"name"))).collect()));let ri=actors.iter().position(|a|a["instance"].as_i64()==Some(self.reference)).or(if actors.is_empty(){None}else{Some(0)});self.reference=ri.and_then(|i|actors[i]["instance"].as_i64()).unwrap_or(0);ui.set_reference_index(ri.map(|i|i as i32).unwrap_or(-1));if !self.stage_initialized&&self.snapshot["stage_choice"].is_number(){ui.set_stage_index(self.snapshot["stage_choice"].as_i64().unwrap_or(0) as i32);self.stage_initialized=true;}
+        let actors=rows(&self.snapshot,"actors");ui.set_references(strings(actors.iter().map(|v|format!("与 {} 同位置",s(v,"name"))).collect()));let ri=actors.iter().position(|a|a["instance"].as_i64()==Some(self.reference)).or(if actors.is_empty(){None}else{Some(0)});self.reference=ri.and_then(|i|actors[i]["instance"].as_i64()).unwrap_or(0);ui.set_reference_index(ri.map(|i|i as i32).unwrap_or(-1));ui.set_stage_available(self.connected&&flag(&self.snapshot,"stage_available"));ui.set_stage_index(self.snapshot["stage_choice"].as_i64().unwrap_or(0) as i32);ui.set_stage_status(s(&self.snapshot,"stage_status").into());
         if page==4 {
             if ui.get_raw_mode(){self.raw_choices(ui);}
             let bodies=self.part_rows(ui,"bodies");let heads=self.part_rows(ui,"heads");
@@ -406,7 +406,6 @@ impl State {
             "hide-row-on"|"hide-row-off"=>{if let Some(r)=self.tree_rows.iter().find(|r|r.key==arg).map(|r|r.value.clone()){self.set_hidden(r,action=="hide-row-on");}return;},
             "hide"=>{if let Some(r)=self.resource_value(){self.hide(r);}},
             "hide-actor"=>{if let Some(a)=self.actor_value(){if let Some(r)=rows(&self.snapshot,"scene_resources").into_iter().find(|r|r["kind"]==0&&r["owner"]==a["instance"]&&!flag(r,"locked")){self.hide(r);}}},
-            "stage"=>self.send(json!({"action":"select_stage","choice":ui.get_stage_index()})),
             "choose-color"=>{let values=[ui.get_red_value(),ui.get_green_value(),ui.get_blue_value()];let current=values.map(|v|(v.parse::<f32>().unwrap_or(0.0).clamp(0.0,1.0)*255.0).round() as u8);if let Some(rgb)=color_dialog::choose(current){ui.set_red_value(format!("{:.4}",rgb[0] as f32/255.0).into());ui.set_green_value(format!("{:.4}",rgb[1] as f32/255.0).into());ui.set_blue_value(format!("{:.4}",rgb[2] as f32/255.0).into());ui.set_color_preview(slint::Color::from_rgb_u8(rgb[0],rgb[1],rgb[2]).into());}},
             "color-off"=>self.send(json!({"action":"camera_color","enabled":false,"color":[0,1,0,1]})),
             "color"=>{let rgb:Option<Vec<f64>>=[ui.get_red_value(),ui.get_green_value(),ui.get_blue_value()].iter().map(|x|x.parse::<f64>().ok().filter(|v|v.is_finite()&&(0.0..=1.0).contains(v))).collect();if let Some(mut rgb)=rgb{rgb.push(1.0);self.send(json!({"action":"camera_color","enabled":action=="color","color":rgb}));}else{self.message="RGB 请输入 0 到 1 的数值。".into();}},
@@ -448,10 +447,11 @@ fn run()->Result<(),Box<dyn std::error::Error>>{
     let client=legacy::pipe::Client::from_args().ok();std::thread::spawn(move||worker(client,rx,events_tx));
     let notes_path=legacy::music::game_root().ok().map(|p|p.join("GakuLoader/Configs/gakuactors/scene-notes.json"));
     let (notes,notes_error)=match notes_path.as_ref().map(|p|scene_tree::load_notes(p)){Some(Ok(v))=>(v,false),Some(Err(_))=>(BTreeMap::new(),true),None=>(BTreeMap::new(),true)};
-    let state=Rc::new(RefCell::new(State{snapshot:json!({"status":"等待游戏和 GakuActors 插件"}),tx:Some(tx),connected:false,connection_detail:"正在检测游戏".into(),character:String::new(),preset:String::new(),actor:String::new(),resource:String::new(),body:String::new(),head:String::new(),edit_id:String::new(),raw:Default::default(),cache:HashMap::new(),lru:VecDeque::new(),requested:HashSet::new(),tree_rows:Vec::new(),collapsed:HashSet::new(),notes,notes_path:notes_path.clone(),notes_error,yaw_dirty:false,pages:[0;3],catalog_scan:false,game_configured:notes_path.is_some(),reference:0,stage_initialized:false,confirm:None,undo:None,save:None,message:String::new(),pose_dirty:false,reset:None,reset_yaw:None}));
+    let state=Rc::new(RefCell::new(State{snapshot:json!({"status":"等待游戏和 GakuActors 插件"}),tx:Some(tx),connected:false,connection_detail:"正在检测游戏".into(),character:String::new(),preset:String::new(),actor:String::new(),resource:String::new(),body:String::new(),head:String::new(),edit_id:String::new(),raw:Default::default(),cache:HashMap::new(),lru:VecDeque::new(),requested:HashSet::new(),tree_rows:Vec::new(),collapsed:HashSet::new(),notes,notes_path:notes_path.clone(),notes_error,yaw_dirty:false,pages:[0;3],catalog_scan:false,game_configured:notes_path.is_some(),reference:0,confirm:None,undo:None,save:None,message:String::new(),pose_dirty:false,reset:None,reset_yaw:None}));
     let library=Rc::new(RefCell::new(resource_library::Library::new()));
     let weak=ui.as_weak();let lib=library.clone();ui.on_library_action(move|action,arg|{if let Some(ui)=weak.upgrade(){lib.borrow_mut().action(&ui,&action,&arg);}});
     let weak=ui.as_weak();let st=state.clone();ui.on_action(move|a,b|{if let Some(ui)=weak.upgrade(){st.borrow_mut().act(&ui,&a,&b);}});
+    let st=state.clone();ui.on_stage_selected(move|choice|st.borrow_mut().send(json!({"action":"select_stage","choice":choice})));
     let weak=ui.as_weak();let st=state.clone();ui.on_changed(move|kind|{if let Some(ui)=weak.upgrade(){let mut st=st.borrow_mut();if kind=="cross"{st.body.clear();st.head.clear();st.pages=[0;3];st.raw_choices(&ui);}st.render(&ui);}});
     state.borrow_mut().render(&ui);
     ui.show()?;

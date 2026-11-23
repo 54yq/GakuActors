@@ -203,6 +203,19 @@ int main() {
     {std::ofstream bad(root/L"stage_bad.json");bad<<"{\"version\":\"bad\",\"choice\":2}";}
     StageChoiceStore badStage;badStage.SetFile(root/L"stage_bad.json");check(!badStage.Load(stageChoice));check(!badStage.Save(1));
     StageLoadHook hook;check(hook.Select(0));check(!hook.Select(1));check(StageLoadHook::Key(4)==nullptr);
+    SceneGate firstPhoto;
+    firstPhoto.ExpectPhotoReplacement(StageLoadHook::Key(3));
+    firstPhoto.Observe("Live",11,StageLoadHook::Key(3),500);
+    check(firstPhoto.Mode()!=PerformanceMode::Photography);
+    firstPhoto.Observe("Photography",12,StageLoadHook::Key(3),501);
+    check(firstPhoto.Mode()==PerformanceMode::Photography&&firstPhoto.Scene()==12);
+    firstPhoto.Reset();
+    firstPhoto.Observe("Photography",13,StageLoadHook::Key(3),502);
+    check(firstPhoto.Mode()==PerformanceMode::None);
+    firstPhoto.ExpectPhotoReplacement(StageLoadHook::Key(3));
+    firstPhoto.ClearPhotoExpectation();
+    firstPhoto.Observe("Photography",13,StageLoadHook::Key(3),503);
+    check(firstPhoto.Mode()==PerformanceMode::None);
     StageLoadHookTestAccess::Run(check);
     auto file=root/L"人物预设.json";
     PresetStore store;store.SetFile(file);check(store.Load());check(store.presets.empty());check(store.Writable());
@@ -225,6 +238,11 @@ int main() {
     auto parsed=Preset{};check(ReadPreset(PresetJson(raw),parsed,error));check(parsed.faceAsset=="face");
     check(!ReadPreset(Json{{"id",5}},parsed,error));
     NativeApiTestAccess::Run(check);
+    check(SelectActorIndex(3,[](int index){return index<3;})==3);
+    check(SelectActorIndex(0,[](int index){return index<8;})==8);
+    check(SelectActorIndex(0,[](int index){return index<64;})==64);
+    check(SelectActorIndex(-1,[](int index){return index<8;})==8);
+    check(SelectActorIndex(0,[](int){return true;})==-1);
     ActorIdentity original{-101,0,-50,"game-original",true,true,true};
     ActorIdentity created{-102,1,-50,"gakuactors-owned",false,false,false};
     std::vector<int> originalInstances{-101};
